@@ -67,6 +67,25 @@ describe('RigidSimulation', () => {
     simulation.dispose();
   });
 
+  it('comes to rest after an off-center fling is released', () => {
+    const simulation = new RigidSimulation('light-solid');
+    run(simulation, 0.2);
+    const origin = new THREE.Vector3(0.25, CUBE_HALF * 1.6, 4);
+    const direction = new THREE.Vector3(0, 0, -1);
+    expect(simulation.beginGrab(new THREE.Ray(origin, direction))).toBe(true);
+    for (let i = 0; i < 30; i++) {
+      simulation.updateGrab(new THREE.Ray(origin.clone().add(new THREE.Vector3(i * 0.04, i * 0.02, 0)), direction));
+      simulation.step(DT);
+    }
+    simulation.endGrab();
+    run(simulation, 6);
+    const settled = new THREE.Vector3(...simulation.stats().center);
+    run(simulation, 2);
+    expect(new THREE.Vector3(...simulation.stats().center).distanceTo(settled)).toBeLessThan(0.01);
+    expect(simulation.stats().center[1]).toBeCloseTo(CUBE_HALF, 1);
+    simulation.dispose();
+  });
+
   it('reset clears impactors and restores the cube', () => {
     const simulation = new RigidSimulation();
     simulation.dropImpactor(0.3, 0.3);

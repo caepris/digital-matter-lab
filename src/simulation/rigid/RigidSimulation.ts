@@ -99,7 +99,9 @@ export class RigidSimulation implements MatterSimulation {
     this.pressBody.setNextKinematicTranslation({ x: 0, y: this.press.bottom + PRESS_HALF_Y, z: 0 });
     this.pressCollider.setEnabled(!pressIsParked(this.press.bottom));
 
+    // addForceAtPoint also accumulates a torque, which resetForces leaves in place.
     this.cube.resetForces(true);
+    this.cube.resetTorques(true);
     if (this.grab) this.applyGrabForce();
 
     this.world.timestep = dt;
