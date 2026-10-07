@@ -18,6 +18,13 @@ export interface ConvertedShellSimulationOptions {
   thickness: number;
   presetId?: string;
   totalMass?: number;
+  /** Particles held in place, e.g. where a garment hangs from a hanger. */
+  pinned?: readonly number[];
+  /**
+   * Adds stiff distance links between vertices two edges apart, so the shell
+   * resists shearing and denting like stamped panels rather than cloth.
+   */
+  structural?: boolean;
 }
 
 /** XPBD thin-shell simulation for an arbitrary indexed surface. */
@@ -25,9 +32,13 @@ export class ConvertedShellSimulation extends XpbdSimulation<ShellPreset> {
   readonly kind = 'shell' as const;
   readonly stretch: DistanceConstraints;
   readonly bend: DistanceConstraints;
+  readonly structure: DistanceConstraints | null;
   readonly thickness: number;
+  /** Separation kept between non-adjacent particles; at least the shell thickness. */
+  readonly contactDistance: number;
+  readonly pinned: readonly number[];
   private readonly hash: SpatialHash;
-  private readonly neighbors = new Set<number>();
+  private readonly ignored = new Set<number>();
 
   constructor(options: ConvertedShellSimulationOptions) {
     const { mesh } = options;
@@ -54,11 +65,39 @@ export class ConvertedShellSimulation extends XpbdSimulation<ShellPreset> {
     this.thickness = thickness;
     this.stretch = new DistanceConstraints(mesh.stretchPairs, mesh.positions);
     this.bend = new DistanceConstraints(mesh.bendPairs, mesh.positions);
-    this.hash = new SpatialHash(thickness, this.count);
+    this.structure = options.structural
+      ? new DistanceConstraints(secondRingPairs(mesh.stretchPairs, this.count), mesh.positions)
+      : null;
+
+    this.pinned = [...new Set(options.pinned ?? [])].filter((index) => index >= 0 && index < this.count);
+    for (const index of this.pinned) this.invMass[index] = 0;
+
+    let edgeLength = 0;
+    for (let i = 0; i < this.stretch.count; i++) edgeLength += this.stretch.rest[i];
+    edgeLength /= Math.max(1, this.stretch.count);
+    this.contactDistance = Math.max(thickness, edgeLength * 0.45);
+    this.hash = new SpatialHash(this.contactDistance, this.count);
     for (let i = 0; i < mesh.stretchPairs.length; i += 2) {
-      const a = mesh.stretchPairs[i];
-      const b = mesh.stretchPairs[i + 1];
-      this.neighbors.add(pairKey(a, b));
+      this.ignored.add(pairKey(mesh.stretchPairs[i], mesh.stretchPairs[i + 1]));
+    }
+    this.ignoreRestContacts(mesh.positions);
+  }
+
+  /** Pairs that already start closer than the contact distance are part of the shape, not collisions. */
+  private ignoreRestContacts(rest: Float32Array): void {
+    const { hash, count, contactDistance } = this;
+    hash.create(rest, count);
+    const reach2 = contactDistance * contactDistance;
+    for (let i = 0; i < count; i++) {
+      hash.query(rest, i, contactDistance);
+      for (let q = 0; q < hash.querySize; q++) {
+        const j = hash.queryIds[q];
+        if (j <= i) continue;
+        const dx = rest[j * 3] - rest[i * 3];
+        const dy = rest[j * 3 + 1] - rest[i * 3 + 1];
+        const dz = rest[j * 3 + 2] - rest[i * 3 + 2];
+        if (dx * dx + dy * dy + dz * dz < reach2) this.ignored.add(pairKey(i, j));
+      }
     }
   }
 
@@ -71,6 +110,16 @@ export class ConvertedShellSimulation extends XpbdSimulation<ShellPreset> {
       h,
       this.preset.compressionCompliance,
     );
+    if (this.structure) {
+      solveDistances(
+        this.positions,
+        this.invMass,
+        this.structure,
+        this.preset.stretchCompliance,
+        h,
+        this.preset.compressionCompliance,
+      );
+    }
     solveDistances(
       this.positions,
       this.invMass,
@@ -81,45 +130,75 @@ export class ConvertedShellSimulation extends XpbdSimulation<ShellPreset> {
   }
 
   protected solveExtraCollisions(): void {
-    const { positions, hash, count, thickness } = this;
+    const { positions, invMass, hash, count, contactDistance } = this;
     hash.create(positions, count);
-    const thickness2 = thickness * thickness;
+    const reach2 = contactDistance * contactDistance;
     for (let i = 0; i < count; i++) {
-      hash.query(positions, i, thickness);
+      hash.query(positions, i, contactDistance);
       for (let q = 0; q < hash.querySize; q++) {
         const j = hash.queryIds[q];
         if (j <= i) continue;
-        if (this.neighbors.has(pairKey(i, j))) continue;
+        const w = invMass[i] + invMass[j];
+        if (w === 0 || this.ignored.has(pairKey(i, j))) continue;
         const dx = positions[j * 3] - positions[i * 3];
         const dy = positions[j * 3 + 1] - positions[i * 3 + 1];
         const dz = positions[j * 3 + 2] - positions[i * 3 + 2];
         const d2 = dx * dx + dy * dy + dz * dz;
-        if (d2 >= thickness2 || d2 < 1e-12) continue;
+        if (d2 >= reach2 || d2 < 1e-12) continue;
         const d = Math.sqrt(d2);
-        const correction = (0.5 * (thickness - d)) / d;
-        positions[i * 3] -= dx * correction;
-        positions[i * 3 + 1] -= dy * correction;
-        positions[i * 3 + 2] -= dz * correction;
-        positions[j * 3] += dx * correction;
-        positions[j * 3 + 1] += dy * correction;
-        positions[j * 3 + 2] += dz * correction;
+        const correction = (contactDistance - d) / d / w;
+        const ci = correction * invMass[i];
+        const cj = correction * invMass[j];
+        positions[i * 3] -= dx * ci;
+        positions[i * 3 + 1] -= dy * ci;
+        positions[i * 3 + 2] -= dz * ci;
+        positions[j * 3] += dx * cj;
+        positions[j * 3 + 1] += dy * cj;
+        positions[j * 3 + 2] += dz * cj;
       }
     }
   }
 
   protected afterStep(): void {
     const plastic = this.preset.plastic;
-    if (plastic) applyDistancePlasticity(this.positions, this.bend, plastic);
+    if (!plastic) return;
+    applyDistancePlasticity(this.positions, this.bend, plastic);
+    if (this.structure) applyDistancePlasticity(this.positions, this.structure, plastic);
   }
 
   protected resetRestState(): void {
     this.stretch.resetRest();
     this.bend.resetRest();
+    this.structure?.resetRest();
   }
 }
 
 function pairKey(a: number, b: number): number {
   return Math.min(a, b) * 1_000_000 + Math.max(a, b);
+}
+
+/** Vertex pairs exactly two edges apart, packed as index pairs. */
+function secondRingPairs(edges: Uint32Array, count: number): Uint32Array {
+  const adjacent: number[][] = Array.from({ length: count }, () => []);
+  for (let i = 0; i < edges.length; i += 2) {
+    adjacent[edges[i]].push(edges[i + 1]);
+    adjacent[edges[i + 1]].push(edges[i]);
+  }
+  const pairs: number[] = [];
+  const seen = new Set<number>();
+  for (let v = 0; v < count; v++) {
+    const direct = new Set(adjacent[v]);
+    for (const n of adjacent[v]) {
+      for (const m of adjacent[n]) {
+        if (m <= v || direct.has(m)) continue;
+        const key = pairKey(v, m);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        pairs.push(v, m);
+      }
+    }
+  }
+  return new Uint32Array(pairs);
 }
 
 /** Thin-plate bending stiffness grows with thickness cubed, so compliance falls by the same factor. */

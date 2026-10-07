@@ -4,7 +4,12 @@ import type { InteractionTarget, ViewportRect } from '../interaction/Interaction
 import { ConversionVisual } from '../rendering/ConversionVisual';
 import { convertSurface, type ConvertedSurface } from '../simulation/conversion/convertSurface';
 import { ConvertedShellSimulation } from '../simulation/conversion/ConvertedShellSimulation';
-import { buildSourceMesh, type SourceMesh, type SourceMeshId } from '../simulation/conversion/sourceMeshes';
+import {
+  buildSourceMesh,
+  pinnedParticles,
+  type SourceMesh,
+  type SourceMeshId,
+} from '../simulation/conversion/sourceMeshes';
 import { clampToPlatform, DROP_TARGET_PLANE_Y, PRESS_REST_BOTTOM } from '../simulation/scene';
 import type { MatterSimulation, SimulationFrame, SimulationStats, ToolId } from '../simulation/types';
 import {
@@ -25,16 +30,18 @@ const emptyFrame: SimulationFrame = {
 };
 
 const TARGET_SPACING: Record<SourceMeshId, number> = {
-  tshirt: 0.115,
-  curtain: 0.13,
-  'car-shell': 0.13,
+  tshirt: 0.07,
+  curtain: 0.1,
+  'car-shell': 0.1,
 };
 
-const PHYSICS: Record<SourceMeshId, { presetId: string; mass: number }> = {
-  tshirt: { presetId: 'loose-cloth', mass: 0.25 },
-  curtain: { presetId: 'structured-fabric', mass: 0.65 },
-  'car-shell': { presetId: 'sheet-metal', mass: 2.4 },
+const PHYSICS: Record<SourceMeshId, { presetId: string; mass: number; structural: boolean }> = {
+  tshirt: { presetId: 'loose-cloth', mass: 0.3, structural: false },
+  curtain: { presetId: 'loose-cloth', mass: 0.9, structural: false },
+  'car-shell': { presetId: 'sheet-metal', mass: 2.4, structural: true },
 };
+
+const CAMERA_DIRECTION = new THREE.Vector3(3.1, 1.65, 3.8).normalize();
 
 export class ConversionWorkspace implements InteractionTarget {
   readonly element: HTMLElement;
@@ -99,7 +106,26 @@ export class ConversionWorkspace implements InteractionTarget {
       RIGHT: THREE.MOUSE.PAN,
     };
     this.orbit.enabled = false;
+    this.frameSource();
     this.refresh();
+  }
+
+  private frameSource(): void {
+    const box = new THREE.Box3();
+    const point = new THREE.Vector3();
+    const positions = this.source.positions;
+    for (let i = 0; i < positions.length; i += 3) box.expandByPoint(point.set(positions[i], positions[i + 1], positions[i + 2]));
+    for (const support of this.source.supports) {
+      box.expandByPoint(point.fromArray(support.from));
+      box.expandByPoint(point.fromArray(support.to));
+    }
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    const extent = Math.max(size.x, size.y, size.z);
+    this.orbit.target.copy(center);
+    this.view.camera.position.copy(center).addScaledVector(CAMERA_DIRECTION, 2.4 + extent * 1.35);
+    this.view.camera.lookAt(center);
+    this.orbit.update();
   }
 
   get camera(): THREE.Camera {
@@ -200,6 +226,7 @@ export class ConversionWorkspace implements InteractionTarget {
     this.status = `Rigid ${this.source.label} solid loaded. Inspect it, then continue to Generate.`;
     this.view.configure(this.source, null, this.thickness);
     this.view.setStage('source');
+    this.frameSource();
     this.refresh();
   }
 
@@ -230,7 +257,11 @@ export class ConversionWorkspace implements InteractionTarget {
       });
       this.converted = converted;
       this.createSimulation();
-      this.status = `Shell generated from ${this.source.label}. Inspect its vertices, then switch to Run.`;
+      const hanging = this.shell?.pinned.length ?? 0;
+      this.status =
+        `Closed shell generated around the ${this.source.label}.` +
+        (hanging > 0 ? ` ${hanging} particles hang from the ${this.sourceId === 'curtain' ? 'rod' : 'hanger'}.` : '') +
+        ' Inspect its vertices, then switch to Run.';
       this.view.configure(this.source, converted, this.thickness);
       this.view.setStage('generate');
       this.view.setStructureVisible(this.state.structureVisible);
@@ -251,6 +282,8 @@ export class ConversionWorkspace implements InteractionTarget {
       thickness: this.thickness,
       presetId: physics.presetId,
       totalMass: physics.mass,
+      structural: physics.structural,
+      pinned: pinnedParticles(this.source, this.converted.positions),
     });
     this.simulationPaused = true;
   }

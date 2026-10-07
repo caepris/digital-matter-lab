@@ -203,6 +203,7 @@ export abstract class XpbdSimulation<P extends XpbdPreset> implements MatterSimu
       if (this.spheres.length > 0) this.collideSpheresWithSurface(radius);
       let pressPush = 0;
       for (let i = 0; i < count; i++) {
+        if (invMass[i] === 0) continue;
         if (pressEngaged) {
           const push = collidePointWithPress(positions, i * 3, radius, pressBottom);
           if (push > 0) pressPush += push / invMass[i];

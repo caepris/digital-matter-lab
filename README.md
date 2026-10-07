@@ -16,12 +16,15 @@ zero-compliance barycentric constraints, so rotated parts stay joined. Unwelded 
 still collide. Returning to Edit restores the authored transforms.
 
 The **Thin conversion** tab demonstrates the render-mesh-to-simulation-mesh workflow.
-Choose a rigid solid shaped like a T-shirt, curtain, or metal car shell, inspect its closed
-surface vertices, then set a physical thickness and generate a reduced fitted surface. The generated shell derives
-stretch and bending constraints from triangle adjacency. In Run, barycentric bindings make
-the detailed source mesh follow that shell while Grab, Drop, and Press act on the simulation
-particles. Structure switches between source vertices and generated shell particles based
-on the current stage.
+Choose an upright rigid solid shaped like a T-shirt on a hanger, a pleated curtain on a rod,
+or a car body, inspect its closed surface vertices, then set a physical thickness and generate
+a reduced closed shell that wraps the whole solid. The generated shell derives stretch and
+bending constraints from triangle adjacency. The T-shirt and curtain run as loose fabric pinned
+where they hang; the car runs as sheet metal with extra second-ring links, so it stays stiff
+and keeps permanent dents. In Run, barycentric bindings plus a normal offset make the detailed
+source mesh follow that shell while Grab, Drop, and Press act on the simulation particles.
+Structure switches between source vertices and generated shell particles based on the
+current stage.
 
 The editor's numbered sidebar guides the workflow: configure and place a part, select it
 from the viewport or part list, transform it, then join touching parts. Position, rotation,

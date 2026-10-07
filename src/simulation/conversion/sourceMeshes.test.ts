@@ -40,6 +40,18 @@ function average(mesh: SourceMesh, accept: (x: number, y: number, z: number) => 
   return sum / count;
 }
 
+function component(mesh: SourceMesh, axis: number, accept: (other: number) => boolean, by: number): number[] {
+  const out: number[] = [];
+  for (let i = 0; i < mesh.positions.length; i += 3) {
+    if (accept(mesh.positions[i + by])) out.push(Math.abs(mesh.positions[i + axis]));
+  }
+  return out;
+}
+
+const xs = (mesh: SourceMesh, acceptY: (y: number) => boolean) => component(mesh, 0, acceptY, 1);
+const zs = (mesh: SourceMesh, acceptY: (y: number) => boolean) => component(mesh, 2, acceptY, 1);
+const ys = (mesh: SourceMesh, acceptX: (x: number) => boolean) => component(mesh, 1, acceptX, 0);
+
 function triangleArea(mesh: SourceMesh, triangle: number): number {
   const positions = mesh.positions;
   const triangles = mesh.triangles;
@@ -58,61 +70,34 @@ function triangleArea(mesh: SourceMesh, triangle: number): number {
   return 0.5 * Math.hypot(crossX, crossY, crossZ);
 }
 
-function maxEdgeIncidence(mesh: SourceMesh): number {
+/** Oriented edge counts; a closed, consistently wound surface uses each directed edge exactly once. */
+function directedEdges(mesh: SourceMesh): Map<string, number> {
   const counts = new Map<string, number>();
   const { triangles } = mesh;
   for (let t = 0; t < triangles.length; t += 3) {
     for (let k = 0; k < 3; k++) {
-      const a = triangles[t + k];
-      const b = triangles[t + ((k + 1) % 3)];
-      const key = a < b ? `${a}:${b}` : `${b}:${a}`;
+      const key = `${triangles[t + k]}>${triangles[t + ((k + 1) % 3)]}`;
       counts.set(key, (counts.get(key) ?? 0) + 1);
     }
   }
-  let max = 0;
-  for (const count of counts.values()) max = Math.max(max, count);
-  return max;
+  return counts;
 }
 
-function boundaryLoopCount(mesh: SourceMesh): number {
-  const neighbors = new Map<number, number[]>();
-  const counts = new Map<string, number>();
-  const { triangles } = mesh;
-  for (let t = 0; t < triangles.length; t += 3) {
-    for (let k = 0; k < 3; k++) {
-      const a = triangles[t + k];
-      const b = triangles[t + ((k + 1) % 3)];
-      const key = a < b ? `${a}:${b}` : `${b}:${a}`;
-      counts.set(key, (counts.get(key) ?? 0) + 1);
-    }
+function signedVolume(mesh: SourceMesh): number {
+  const p = mesh.positions;
+  const t = mesh.triangles;
+  let volume = 0;
+  for (let i = 0; i < t.length; i += 3) {
+    const a = t[i] * 3;
+    const b = t[i + 1] * 3;
+    const c = t[i + 2] * 3;
+    volume +=
+      (p[a] * (p[b + 1] * p[c + 2] - p[b + 2] * p[c + 1]) -
+        p[a + 1] * (p[b] * p[c + 2] - p[b + 2] * p[c]) +
+        p[a + 2] * (p[b] * p[c + 1] - p[b + 1] * p[c])) /
+      6;
   }
-  for (const [key, count] of counts) {
-    if (count !== 1) continue;
-    const [a, b] = key.split(':').map(Number);
-    neighbors.set(a, [...(neighbors.get(a) ?? []), b]);
-    neighbors.set(b, [...(neighbors.get(b) ?? []), a]);
-  }
-  const seen = new Set<string>();
-  let loops = 0;
-  for (const start of [...neighbors.keys()].sort((a, b) => a - b)) {
-    const next = (neighbors.get(start) ?? []).find((other) => !seen.has(start < other ? `${start}:${other}` : `${other}:${start}`));
-    if (next === undefined) continue;
-    let previous = start;
-    let current = next;
-    seen.add(start < next ? `${start}:${next}` : `${next}:${start}`);
-    for (let guard = 0; guard < neighbors.size + 2; guard++) {
-      if (current === start) {
-        loops++;
-        break;
-      }
-      const step = (neighbors.get(current) ?? []).find((other) => other !== previous);
-      if (step === undefined) break;
-      seen.add(current < step ? `${current}:${step}` : `${step}:${current}`);
-      previous = current;
-      current = step;
-    }
-  }
-  return loops;
+  return volume;
 }
 
 function expectSurface(mesh: SourceMesh): void {
@@ -135,11 +120,17 @@ function expectSurface(mesh: SourceMesh): void {
     expect(triangleArea(mesh, t / 3)).toBeGreaterThan(1e-8);
   }
   expect(used.size).toBe(count);
-  expect(maxEdgeIncidence(mesh)).toBeLessThanOrEqual(2);
+  const edges = directedEdges(mesh);
+  for (const [key, uses] of edges) {
+    expect(uses).toBe(1);
+    const [a, b] = key.split('>');
+    expect(edges.get(`${b}>${a}`)).toBe(1);
+  }
+  expect(signedVolume(mesh)).toBeGreaterThan(0.005);
   const box = bounds(mesh);
   expect((box.min[0] + box.max[0]) / 2).toBeCloseTo(0, 5);
   expect((box.min[2] + box.max[2]) / 2).toBeCloseTo(0, 5);
-  expect(box.min[1]).toBeCloseTo(mesh.solidThickness * 0.5 + 0.01, 5);
+  expect(box.min[1]).toBeGreaterThan(0);
   expect(Math.abs(box.min[0])).toBeLessThanOrEqual(PLATFORM_HALF);
   expect(box.max[0]).toBeLessThanOrEqual(PLATFORM_HALF);
   expect(Math.abs(box.min[2])).toBeLessThanOrEqual(PLATFORM_HALF);
@@ -160,8 +151,6 @@ describe('source mesh catalog', () => {
       expect(metadata.color).toBeGreaterThan(0);
       expect(metadata.defaultThickness).toBeGreaterThan(0);
       expect(metadata.defaultThickness).toBeLessThan(0.05);
-      expect(metadata.solidThickness).toBeGreaterThan(metadata.defaultThickness);
-      expect(metadata.solidThickness).toBeLessThan(0.2);
       colors.add(metadata.color);
     }
     expect(colors.size).toBe(SOURCE_MESH_IDS.length);
@@ -181,50 +170,39 @@ describe('procedural source meshes', () => {
     expect(Array.from(again.triangles)).toEqual(Array.from(mesh.triangles));
   });
 
-  it('builds a wide shirt with sleeves, a drooping cuff, and a neck opening', () => {
+  it('builds an upright shirt with sleeves wider than the hem and a scooped neck', () => {
     const mesh = buildSourceMesh('tshirt');
     const box = bounds(mesh);
-    expect(box.max[0] - box.min[0]).toBeGreaterThan(box.max[2] - box.min[2]);
-    expect(box.max[0] - box.min[0]).toBeGreaterThan(1.4);
-    expect(boundaryLoopCount(mesh)).toBe(2);
-    const cuffY = average(mesh, (x) => Math.abs(x) > 0.7, 1);
-    const shoulderY = average(mesh, (x, _y, z) => Math.abs(x) < 0.12 && z > box.max[2] - 0.12, 1);
-    expect(cuffY).toBeLessThan(shoulderY - 0.04);
+    const height = box.max[1] - box.min[1];
+    const depth = box.max[2] - box.min[2];
+    expect(height).toBeGreaterThan(0.9);
+    expect(height).toBeGreaterThan(depth * 3);
+    const hemWidth = 2 * Math.max(...xs(mesh, (y) => y < box.min[1] + 0.05));
+    const sleeveWidth = box.max[0] - box.min[0];
+    expect(sleeveWidth).toBeGreaterThan(hemWidth * 1.8);
+    const cuffY = average(mesh, (x) => Math.abs(x) > 0.55, 1);
+    expect(cuffY).toBeGreaterThan(box.min[1] + height * 0.5);
+    const neckTop = Math.max(...ys(mesh, (x) => Math.abs(x) < 0.03));
+    expect(neckTop).toBeLessThan(box.max[1] - 0.05);
+    expect(mesh.pinRegion).not.toBeNull();
+    expect(mesh.supports.length).toBeGreaterThan(0);
   });
 
-  it('builds a tall curtain with a gathered top and deeper folds at the hem', () => {
+  it('builds a tall pleated curtain hanging from a rod', () => {
     const mesh = buildSourceMesh('curtain');
     const box = bounds(mesh);
     const height = box.max[1] - box.min[1];
     expect(height).toBeGreaterThan(1.2);
-    expect(height).toBeGreaterThan(box.max[2] - box.min[2]);
-    expect(boundaryLoopCount(mesh)).toBe(1);
-    const hemZ = average(mesh, (_x, y) => y < box.min[1] + height * 0.15, 2);
-    const topZ = average(mesh, (_x, y) => y > box.max[1] - height * 0.15, 2);
-    expect(Math.abs(hemZ)).toBeLessThan(0.05);
-    expect(Math.abs(topZ)).toBeLessThan(0.05);
-    let hemSpan = 0;
-    let topSpan = 0;
-    let hemWidth = 0;
-    let topWidth = 0;
-    for (let i = 0; i < mesh.positions.length; i += 3) {
-      const y = mesh.positions[i + 1];
-      const z = mesh.positions[i + 2];
-      const x = Math.abs(mesh.positions[i]);
-      if (y < box.min[1] + height * 0.15) {
-        hemSpan = Math.max(hemSpan, Math.abs(z));
-        hemWidth = Math.max(hemWidth, x);
-      }
-      if (y > box.max[1] - height * 0.15) {
-        topSpan = Math.max(topSpan, Math.abs(z));
-        topWidth = Math.max(topWidth, x);
-      }
-    }
-    expect(hemSpan).toBeGreaterThan(topSpan * 2);
-    expect(hemWidth).toBeGreaterThan(topWidth + 0.2);
+    expect(height).toBeGreaterThan((box.max[2] - box.min[2]) * 4);
+    const hemSpan = Math.max(...zs(mesh, (y) => y < box.min[1] + height * 0.1));
+    const topSpan = Math.max(...zs(mesh, (y) => y > box.max[1] - height * 0.1));
+    expect(hemSpan).toBeGreaterThan(topSpan);
+    const rod = mesh.supports[0];
+    expect(rod.from[1]).toBeGreaterThan(box.max[1]);
+    expect(mesh.pinRegion?.minY).toBeLessThan(box.max[1]);
   });
 
-  it('builds a long car body with a raised cabin and wheel-arch holes', () => {
+  it('builds a long car body with a raised cabin and wheel arches', () => {
     const mesh = buildSourceMesh('car-shell');
     const box = bounds(mesh);
     const length = box.max[0] - box.min[0];
@@ -233,11 +211,11 @@ describe('procedural source meshes', () => {
     expect(length).toBeGreaterThan(width);
     expect(width).toBeGreaterThan(height);
     expect(length).toBeGreaterThan(2);
-    expect(boundaryLoopCount(mesh)).toBe(5);
-    const cabinY = average(mesh, (x) => Math.abs(x) < 0.2, 1);
-    const noseY = average(mesh, (x) => x > 0.9, 1);
-    const tailY = average(mesh, (x) => x < -0.9, 1);
+    const cabinY = Math.max(...ys(mesh, (x) => Math.abs(x) < 0.2));
+    const noseY = Math.max(...ys(mesh, (x) => x > 0.9));
     expect(cabinY).toBeGreaterThan(noseY + 0.2);
-    expect(cabinY).toBeGreaterThan(tailY + 0.15);
+    const archBottom = Math.min(...ys(mesh, (x) => Math.abs(Math.abs(x) - 0.7) < 0.03));
+    expect(archBottom).toBeGreaterThan(box.min[1] + 0.15);
+    expect(mesh.pinRegion).toBeNull();
   });
 });

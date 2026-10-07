@@ -7,6 +7,7 @@ import { PanelView, type BodyVisual } from './PanelView';
 import { createParticleOverlay, type ParticleOverlay } from './StructureOverlay';
 
 const GENERATED_COLOR = 0x60e0c1;
+const SUPPORT_COLOR = 0x8a939f;
 
 /** Displays the detailed source, generated shell, and source-to-shell runtime binding. */
 export class ConversionVisual {
@@ -62,15 +63,17 @@ class ConversionBodyVisual implements BodyVisual {
   private generatedMaterial: THREE.MeshStandardMaterial | null = null;
   private sourceGeometry: THREE.BufferGeometry | null = null;
   private generatedGeometry: THREE.BufferGeometry | null = null;
-  private sourceThickAttribute: THREE.BufferAttribute | null = null;
+  private sourceAttribute: THREE.BufferAttribute | null = null;
   private generatedCenterAttribute: THREE.BufferAttribute | null = null;
   private generatedThickAttribute: THREE.BufferAttribute | null = null;
   private sourceOverlay: ParticleOverlay | null = null;
   private generatedOverlay: ParticleOverlay | null = null;
-  private sourceEdges: Uint32Array<ArrayBufferLike> = new Uint32Array();
-  private thickPositions = new Float32Array();
-  private centerPositions = new Float32Array();
+  private readonly supports = new THREE.Group();
+  private readonly supportMaterial = new THREE.MeshStandardMaterial({ color: SUPPORT_COLOR, roughness: 0.35, metalness: 0.8 });
+  private sourcePositions = new Float32Array();
   private generatedThickPositions = new Float32Array();
+  /** Signed distance of each source vertex from its bound point, along the shell normal. */
+  private bindingOffsets: Float32Array<ArrayBufferLike> = new Float32Array();
 
   constructor(source: SourceMesh) {
     this.configure(source, null, source.defaultThickness);
@@ -81,19 +84,18 @@ class ConversionBodyVisual implements BodyVisual {
     this.source = source;
     this.converted = converted;
     this.thickness = thickness;
-    this.centerPositions = source.positions.slice();
-    const thick = buildThickIndices(source.positions.length / 3, source.triangles, boundaryEdges(source.triangles));
-    this.sourceEdges = uniqueEdges(thick);
-    this.thickPositions = new Float32Array((source.positions.length / 3) * 2 * 3);
+    this.sourcePositions = source.positions.slice();
     this.sourceGeometry = new THREE.BufferGeometry();
-    this.sourceThickAttribute = new THREE.BufferAttribute(this.thickPositions, 3);
-    this.sourceThickAttribute.setUsage(THREE.DynamicDrawUsage);
-    this.sourceGeometry.setAttribute('position', this.sourceThickAttribute);
-    this.sourceGeometry.setIndex(new THREE.BufferAttribute(thick, 1));
+    this.sourceAttribute = new THREE.BufferAttribute(this.sourcePositions, 3);
+    this.sourceAttribute.setUsage(THREE.DynamicDrawUsage);
+    this.sourceGeometry.setAttribute('position', this.sourceAttribute);
+    this.sourceGeometry.setIndex(new THREE.BufferAttribute(source.triangles, 1));
+    this.sourceGeometry.computeVertexNormals();
+    const metal = source.id === 'car-shell';
     this.sourceMaterial = new THREE.MeshStandardMaterial({
       color: source.color,
-      roughness: source.id === 'car-shell' ? 0.28 : 0.46,
-      metalness: source.id === 'car-shell' ? 0.75 : 0.2,
+      roughness: metal ? 0.28 : 0.88,
+      metalness: metal ? 0.75 : 0,
       side: THREE.DoubleSide,
     });
     this.sourceMesh = new THREE.Mesh(this.sourceGeometry, this.sourceMaterial);
@@ -102,24 +104,22 @@ class ConversionBodyVisual implements BodyVisual {
     this.sourceMesh.frustumCulled = false;
     this.object.add(this.sourceMesh);
 
-    this.sourceOverlay = createParticleOverlay(this.sourceThickAttribute, this.sourceEdges, 0.025);
+    this.sourceOverlay = createParticleOverlay(this.sourceAttribute, uniqueEdges(source.triangles), 0.02);
     this.object.add(this.sourceOverlay.object);
+
+    for (const support of source.supports) this.supports.add(supportMesh(support, this.supportMaterial));
+    this.object.add(this.supports);
 
     if (converted) {
       this.generatedCenterAttribute = new THREE.BufferAttribute(converted.positions.slice(), 3);
       this.generatedCenterAttribute.setUsage(THREE.DynamicDrawUsage);
-      const generatedIndices = buildThickIndices(
-        converted.positions.length / 3,
-        converted.triangles,
-        converted.boundaryPairs,
-      );
+      const generatedIndices = buildLayeredIndices(converted.positions.length / 3, converted.triangles, converted.boundaryPairs);
       this.generatedThickPositions = new Float32Array(converted.positions.length * 2);
       this.generatedThickAttribute = new THREE.BufferAttribute(this.generatedThickPositions, 3);
       this.generatedThickAttribute.setUsage(THREE.DynamicDrawUsage);
       this.generatedGeometry = new THREE.BufferGeometry();
       this.generatedGeometry.setAttribute('position', this.generatedThickAttribute);
       this.generatedGeometry.setIndex(new THREE.BufferAttribute(generatedIndices, 1));
-      this.generatedGeometry.computeVertexNormals();
       this.generatedMaterial = new THREE.MeshStandardMaterial({
         color: GENERATED_COLOR,
         roughness: 0.65,
@@ -137,23 +137,23 @@ class ConversionBodyVisual implements BodyVisual {
       this.object.add(this.generatedMesh);
       this.generatedOverlay = createParticleOverlay(this.generatedCenterAttribute, converted.stretchPairs, 0.035);
       this.object.add(this.generatedOverlay.object);
+      this.bindingOffsets = computeBindingOffsets(source.positions, converted);
+      this.updateGeneratedSurface(converted.positions);
     }
 
-    this.updateThickSurface();
-    if (converted) this.updateGeneratedSurface(converted.positions);
     this.applyVisibility();
   }
 
   update(frame: SimulationFrame): void {
     const particles = frame.particles;
     if (particles && this.converted && this.stage === 'run') {
-      this.bindSource(particles);
+      const normals = vertexNormals(particles, this.converted.triangles);
+      this.bindSource(particles, normals);
       if (this.generatedCenterAttribute) {
         (this.generatedCenterAttribute.array as Float32Array).set(particles);
         this.generatedCenterAttribute.needsUpdate = true;
       }
-      this.updateThickSurface();
-      this.updateGeneratedSurface(particles);
+      this.updateGeneratedSurface(particles, normals);
       this.generatedOverlay?.update();
     }
   }
@@ -165,13 +165,13 @@ class ConversionBodyVisual implements BodyVisual {
   setStage(stage: ConversionStage): void {
     this.stage = stage;
     if (stage !== 'run') {
-      this.centerPositions.set(this.source.positions);
+      this.sourcePositions.set(this.source.positions);
+      this.commitSource();
       if (this.generatedCenterAttribute && this.converted) {
         (this.generatedCenterAttribute.array as Float32Array).set(this.converted.positions);
         this.generatedCenterAttribute.needsUpdate = true;
         this.updateGeneratedSurface(this.converted.positions);
       }
-      this.updateThickSurface();
     }
     this.applyVisibility();
   }
@@ -183,54 +183,45 @@ class ConversionBodyVisual implements BodyVisual {
 
   dispose(): void {
     this.clear();
+    this.supportMaterial.dispose();
   }
 
-  private bindSource(particles: Float32Array): void {
+  private bindSource(particles: Float32Array, normals: Float32Array): void {
     const converted = this.converted;
     if (!converted) return;
+    const out = this.sourcePositions;
     for (let i = 0; i < converted.sourceBindings.length; i++) {
       const binding = converted.sourceBindings[i];
       const corner = binding.triangle * 3;
-      const a = converted.triangles[corner];
-      const b = converted.triangles[corner + 1];
-      const c = converted.triangles[corner + 2];
+      const a = converted.triangles[corner] * 3;
+      const b = converted.triangles[corner + 1] * 3;
+      const c = converted.triangles[corner + 2] * 3;
       const [wa, wb, wc] = binding.barycentric;
-      for (let axis = 0; axis < 3; axis++) {
-        this.centerPositions[i * 3 + axis] =
-          particles[a * 3 + axis] * wa + particles[b * 3 + axis] * wb + particles[c * 3 + axis] * wc;
-      }
+      const nx = normals[a] * wa + normals[b] * wb + normals[c] * wc;
+      const ny = normals[a + 1] * wa + normals[b + 1] * wb + normals[c + 1] * wc;
+      const nz = normals[a + 2] * wa + normals[b + 2] * wb + normals[c + 2] * wc;
+      const scale = this.bindingOffsets[i] / (Math.hypot(nx, ny, nz) || 1);
+      out[i * 3] = particles[a] * wa + particles[b] * wb + particles[c] * wc + nx * scale;
+      out[i * 3 + 1] = particles[a + 1] * wa + particles[b + 1] * wb + particles[c + 1] * wc + ny * scale;
+      out[i * 3 + 2] = particles[a + 2] * wa + particles[b + 2] * wb + particles[c + 2] * wc + nz * scale;
     }
+    this.commitSource();
   }
 
-  private updateThickSurface(): void {
-    const count = this.centerPositions.length / 3;
-    const normals = vertexNormals(this.centerPositions, this.source.triangles);
-    const half = this.source.solidThickness * 0.5;
-    for (let i = 0; i < count; i++) {
-      for (let axis = 0; axis < 3; axis++) {
-        const center = this.centerPositions[i * 3 + axis];
-        const offset = normals[i * 3 + axis] * half;
-        this.thickPositions[i * 3 + axis] = center + offset;
-        this.thickPositions[(i + count) * 3 + axis] = center - offset;
-      }
-    }
-    if (this.sourceThickAttribute) this.sourceThickAttribute.needsUpdate = true;
+  private commitSource(): void {
+    if (this.sourceAttribute) this.sourceAttribute.needsUpdate = true;
     this.sourceGeometry?.computeVertexNormals();
     this.sourceOverlay?.update();
   }
 
-  private updateGeneratedSurface(centers: Float32Array): void {
+  private updateGeneratedSurface(centers: Float32Array, normals?: Float32Array): void {
     if (!this.converted || !this.generatedThickAttribute) return;
     const count = centers.length / 3;
-    const normals = vertexNormals(centers, this.converted.triangles);
+    const n = normals ?? vertexNormals(centers, this.converted.triangles);
     const half = this.thickness * 0.5;
-    for (let i = 0; i < count; i++) {
-      for (let axis = 0; axis < 3; axis++) {
-        const center = centers[i * 3 + axis];
-        const offset = normals[i * 3 + axis] * half;
-        this.generatedThickPositions[i * 3 + axis] = center + offset;
-        this.generatedThickPositions[(i + count) * 3 + axis] = center - offset;
-      }
+    for (let i = 0; i < count * 3; i++) {
+      this.generatedThickPositions[i] = centers[i] + n[i] * half;
+      this.generatedThickPositions[i + count * 3] = centers[i] - n[i] * half;
     }
     this.generatedThickAttribute.needsUpdate = true;
     this.generatedGeometry?.computeVertexNormals();
@@ -239,7 +230,6 @@ class ConversionBodyVisual implements BodyVisual {
   private applyVisibility(): void {
     if (!this.sourceMesh) return;
     const generated = this.stage === 'generate';
-    this.sourceMesh.visible = true;
     if (this.sourceMaterial) {
       this.sourceMaterial.transparent = generated;
       this.sourceMaterial.opacity = generated ? 0.16 : 1;
@@ -255,6 +245,8 @@ class ConversionBodyVisual implements BodyVisual {
 
   private clear(): void {
     this.object.clear();
+    for (const child of this.supports.children) (child as THREE.Mesh).geometry.dispose();
+    this.supports.clear();
     this.sourceGeometry?.dispose();
     this.generatedGeometry?.dispose();
     this.sourceMaterial?.dispose();
@@ -269,10 +261,47 @@ class ConversionBodyVisual implements BodyVisual {
     this.generatedMaterial = null;
     this.sourceOverlay = null;
     this.generatedOverlay = null;
-    this.sourceThickAttribute = null;
+    this.sourceAttribute = null;
     this.generatedCenterAttribute = null;
     this.generatedThickAttribute = null;
+    this.bindingOffsets = new Float32Array();
   }
+}
+
+function supportMesh(support: SourceMesh['supports'][number], material: THREE.Material): THREE.Mesh {
+  const from = new THREE.Vector3().fromArray(support.from);
+  const to = new THREE.Vector3().fromArray(support.to);
+  const direction = to.clone().sub(from);
+  const geometry = new THREE.CylinderGeometry(support.radius, support.radius, direction.length() + support.radius * 2, 12);
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.position.copy(from).add(to).multiplyScalar(0.5);
+  mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction.normalize());
+  mesh.castShadow = true;
+  return mesh;
+}
+
+function computeBindingOffsets(source: Float32Array, converted: ConvertedSurface): Float32Array {
+  const normals = vertexNormals(converted.positions, converted.triangles);
+  const positions = converted.positions;
+  const offsets = new Float32Array(converted.sourceBindings.length);
+  for (let i = 0; i < offsets.length; i++) {
+    const binding = converted.sourceBindings[i];
+    const corner = binding.triangle * 3;
+    const a = converted.triangles[corner] * 3;
+    const b = converted.triangles[corner + 1] * 3;
+    const c = converted.triangles[corner + 2] * 3;
+    const [wa, wb, wc] = binding.barycentric;
+    let dot = 0;
+    let length2 = 0;
+    for (let axis = 0; axis < 3; axis++) {
+      const bound = positions[a + axis] * wa + positions[b + axis] * wb + positions[c + axis] * wc;
+      const normal = normals[a + axis] * wa + normals[b + axis] * wb + normals[c + axis] * wc;
+      dot += (source[i * 3 + axis] - bound) * normal;
+      length2 += normal * normal;
+    }
+    offsets[i] = dot / (Math.sqrt(length2) || 1);
+  }
+  return offsets;
 }
 
 function uniqueEdges(triangles: Uint32Array): Uint32Array {
@@ -289,22 +318,8 @@ function uniqueEdges(triangles: Uint32Array): Uint32Array {
   return new Uint32Array(Array.from(edges.values()).flat());
 }
 
-function boundaryEdges(triangles: Uint32Array): Uint32Array {
-  const edges = new Map<string, { a: number; b: number; count: number }>();
-  for (let t = 0; t < triangles.length; t += 3) {
-    for (let k = 0; k < 3; k++) {
-      const a = triangles[t + k];
-      const b = triangles[t + ((k + 1) % 3)];
-      const key = `${Math.min(a, b)}:${Math.max(a, b)}`;
-      const edge = edges.get(key);
-      if (edge) edge.count++;
-      else edges.set(key, { a, b, count: 1 });
-    }
-  }
-  return new Uint32Array(Array.from(edges.values()).filter((edge) => edge.count === 1).flatMap((edge) => [edge.a, edge.b]));
-}
-
-function buildThickIndices(count: number, triangles: Uint32Array, boundary: Uint32Array): Uint32Array {
+/** Outer and inner layers of a shell offset along its normals, joined along any open edges. */
+function buildLayeredIndices(count: number, triangles: Uint32Array, boundary: Uint32Array): Uint32Array {
   const indices: number[] = [];
   for (let t = 0; t < triangles.length; t += 3) {
     const a = triangles[t];

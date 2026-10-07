@@ -6,17 +6,17 @@ export const CONVERSION_SOURCES = [
   {
     id: 'tshirt',
     label: 'T-shirt',
-    description: 'A rigid solid shaped like a T-shirt with a torso and sleeves.',
+    description: 'An upright rigid T-shirt on a hanger. Its shell drapes like cotton jersey.',
   },
   {
     id: 'curtain',
     label: 'Curtain',
-    description: 'A rigid solid shaped like a curtain with vertical folds.',
+    description: 'A pleated rigid curtain on a rod. Its shell hangs and swings like drapery fabric.',
   },
   {
     id: 'car-shell',
     label: 'Car shell',
-    description: 'A rigid solid shaped like a metal vehicle body.',
+    description: 'A rigid car body with wheel arches. Its shell is stiff sheet metal that dents under hard hits.',
   },
 ] as const;
 
@@ -78,7 +78,7 @@ const SIM_TOOLS: { id: ToolId; label: string; hint: string }[] = [
 
 const STAGE_HINTS: Record<ConversionStage, string> = {
   source: 'Choose a rigid solid mesh. Structure shows the vertices on its closed surface.',
-  generate: 'Set a thickness in centimeters, then generate a thin simulatable shell.',
+  generate: 'Set a thickness in centimeters, then generate a closed thin shell that wraps the whole solid.',
   run: '',
 };
 

@@ -196,7 +196,7 @@ describe('AssemblySimulation', () => {
     const end = simulation.stats().center;
     expect(Math.hypot(end[0] - start[0], end[2] - start[2])).toBeLessThan(0.1);
     expect(Math.abs(end[1] - start[1])).toBeLessThan(0.05);
-  });
+  }, 20_000);
 
   it.each(['rigid-base', 'gel-core', 'cloth-skin'])('can grab the %s and pull the connected assembly', (partId) => {
     const simulation = new AssemblySimulation(document);

@@ -216,7 +216,6 @@ function expectConverted(source: IndexedTriangleSurface, surface: ConvertedSurfa
   expect(bend.size).toBe(surface.bendPairs.length / 2);
   expect(boundary.size).toBe(surface.boundaryPairs.length / 2);
   expect(stretch.size).toBe(edges.size);
-  expect(boundary.size).toBeGreaterThan(0);
   let interior = 0;
   for (const [key, edge] of edges) {
     const [a, b] = key.split(':').map(Number);
@@ -333,7 +332,24 @@ describe('convertSurface', () => {
     expect(snapshot(fine)).toEqual(snapshot(surfaceOf(mesh, 0.06)));
   });
 
-  it.each(SOURCE_MESH_IDS)('converts %s deterministically and keeps its openings', (id: SourceMeshId) => {
+  it('keeps the openings of an open surface', () => {
+    const positions: number[] = [];
+    const triangles: number[] = [];
+    const n = 20;
+    for (let j = 0; j <= n; j++) for (let i = 0; i <= n; i++) positions.push(i / n, 0, j / n);
+    for (let j = 0; j < n; j++) {
+      for (let i = 0; i < n; i++) {
+        const a = j * (n + 1) + i;
+        triangles.push(a, a + 1, a + n + 2, a, a + n + 2, a + n + 1);
+      }
+    }
+    const mesh = { positions: new Float32Array(positions), triangles: new Uint32Array(triangles) };
+    const surface = surfaceOf(mesh, 0.12);
+    expectConverted(mesh, surface, 0.12);
+    expect(boundaryLoopCount(surface.triangles)).toBe(1);
+  });
+
+  it.each(SOURCE_MESH_IDS)('converts %s deterministically into a closed shell that wraps the solid', (id: SourceMeshId) => {
     const mesh = buildSourceMesh(id);
     const copy = mesh.positions.slice();
     const surface = surfaceOf(mesh);
@@ -341,8 +357,7 @@ describe('convertSurface', () => {
     expect(snapshot(surface)).toEqual(snapshot(surfaceOf(mesh)));
     expect(surface.positions.length).toBeLessThan(mesh.positions.length);
     expectConverted(mesh, surface, SPACING);
-    if (id === 'tshirt') expect(boundaryLoopCount(surface.triangles)).toBeGreaterThanOrEqual(2);
-    if (id === 'curtain') expect(boundaryLoopCount(surface.triangles)).toBe(1);
-    if (id === 'car-shell') expect(boundaryLoopCount(surface.triangles)).toBeGreaterThanOrEqual(5);
+    expect(surface.boundaryPairs.length).toBe(0);
+    expect(boundaryLoopCount(surface.triangles)).toBe(0);
   });
 });

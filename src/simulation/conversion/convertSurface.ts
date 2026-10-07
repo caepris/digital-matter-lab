@@ -70,7 +70,7 @@ export function convertSurface(input: SurfaceConversionInput): ConvertedSurface 
     stretchPairs: pairs.stretchPairs,
     bendPairs: pairs.bendPairs,
     boundaryPairs: pairs.boundaryPairs,
-    sourceBindings: bindSources(positions, compact.positions, compact.triangles),
+    sourceBindings: bindSources(positions, compact.positions, compact.triangles, targetSpacing),
   };
 }
 
@@ -667,13 +667,93 @@ function uniquePairs(pairs: number[]): number[] {
   return sorted;
 }
 
-function bindSources(source: Float32Array, positions: Float32Array, triangles: Uint32Array): SourceVertexBinding[] {
+function bindSources(
+  source: Float32Array,
+  positions: Float32Array,
+  triangles: Uint32Array,
+  cell: number,
+): SourceVertexBinding[] {
+  const grid = new TriangleGrid(positions, triangles, cell);
   const vertexCount = source.length / 3;
   const bindings: SourceVertexBinding[] = [];
   for (let i = 0; i < vertexCount; i++) {
-    bindings.push(closestBinding(source[i * 3], source[i * 3 + 1], source[i * 3 + 2], positions, triangles));
+    bindings.push(closestBinding(source[i * 3], source[i * 3 + 1], source[i * 3 + 2], positions, triangles, grid));
   }
   return bindings;
+}
+
+/** Buckets triangles by bounding box so closest-triangle queries only test nearby faces. */
+class TriangleGrid {
+  private readonly cells = new Map<string, number[]>();
+  private readonly marks: Uint32Array;
+  private stamp = 0;
+  private readonly extent: number;
+
+  constructor(
+    positions: Float32Array,
+    triangles: Uint32Array,
+    private readonly cell: number,
+  ) {
+    this.marks = new Uint32Array(triangles.length / 3);
+    let min = Infinity;
+    let max = -Infinity;
+    for (let i = 0; i < positions.length; i++) {
+      min = Math.min(min, positions[i]);
+      max = Math.max(max, positions[i]);
+    }
+    this.extent = max - min;
+    for (let t = 0; t < triangles.length / 3; t++) {
+      const lo = [Infinity, Infinity, Infinity];
+      const hi = [-Infinity, -Infinity, -Infinity];
+      for (let k = 0; k < 3; k++) {
+        const base = triangles[t * 3 + k] * 3;
+        for (let axis = 0; axis < 3; axis++) {
+          lo[axis] = Math.min(lo[axis], positions[base + axis]);
+          hi[axis] = Math.max(hi[axis], positions[base + axis]);
+        }
+      }
+      for (let ix = this.index(lo[0]); ix <= this.index(hi[0]); ix++) {
+        for (let iy = this.index(lo[1]); iy <= this.index(hi[1]); iy++) {
+          for (let iz = this.index(lo[2]); iz <= this.index(hi[2]); iz++) {
+            const key = `${ix},${iy},${iz}`;
+            const list = this.cells.get(key);
+            if (list) list.push(t);
+            else this.cells.set(key, [t]);
+          }
+        }
+      }
+    }
+  }
+
+  /** Triangles whose bounds may lie within `radius` of the point; `null` once the radius covers everything. */
+  near(x: number, y: number, z: number, radius: number): number[] | null {
+    const span = (2 * radius) / this.cell + 2;
+    if (radius > this.extent + this.cell || span * span * span > this.marks.length * 8) return null;
+    this.stamp++;
+    const out: number[] = [];
+    for (let ix = this.index(x - radius); ix <= this.index(x + radius); ix++) {
+      for (let iy = this.index(y - radius); iy <= this.index(y + radius); iy++) {
+        for (let iz = this.index(z - radius); iz <= this.index(z + radius); iz++) {
+          const list = this.cells.get(`${ix},${iy},${iz}`);
+          if (!list) continue;
+          for (const triangle of list) {
+            if (this.marks[triangle] === this.stamp) continue;
+            this.marks[triangle] = this.stamp;
+            out.push(triangle);
+          }
+        }
+      }
+    }
+    return out;
+  }
+
+  get spacing(): number {
+    return this.cell;
+  }
+
+  private index(value: number): number {
+    return Math.floor(value / this.cell);
+  }
 }
 
 function closestBinding(
@@ -682,11 +762,30 @@ function closestBinding(
   z: number,
   positions: Float32Array,
   triangles: Uint32Array,
+  grid: TriangleGrid,
 ): SourceVertexBinding {
+  for (let radius = grid.spacing; ; radius *= 2) {
+    const candidates = grid.near(x, y, z, radius);
+    const found = closestAmong(x, y, z, positions, triangles, candidates);
+    if (candidates === null || found.distance2 <= radius * radius) return found.binding;
+  }
+}
+
+function closestAmong(
+  x: number,
+  y: number,
+  z: number,
+  positions: Float32Array,
+  triangles: Uint32Array,
+  candidates: number[] | null,
+): { binding: SourceVertexBinding; distance2: number } {
   let best = Infinity;
   let triangle = 0;
   let barycentric: readonly [number, number, number] = [1, 0, 0];
-  for (let t = 0; t < triangles.length; t += 3) {
+  const count = candidates ? candidates.length : triangles.length / 3;
+  for (let index = 0; index < count; index++) {
+    const id = candidates ? candidates[index] : index;
+    const t = id * 3;
     const a = triangles[t] * 3;
     const b = triangles[t + 1] * 3;
     const c = triangles[t + 2] * 3;
@@ -704,13 +803,13 @@ function closestBinding(
       positions[c + 1],
       positions[c + 2],
     );
-    if (hit.distance2 < best) {
+    if (hit.distance2 < best || (hit.distance2 === best && id < triangle)) {
       best = hit.distance2;
-      triangle = t / 3;
+      triangle = id;
       barycentric = hit.barycentric;
     }
   }
-  return { triangle, barycentric };
+  return { binding: { triangle, barycentric }, distance2: best };
 }
 
 /** Closest point on triangle ABC, as barycentric weights that reconstruct that point. */
