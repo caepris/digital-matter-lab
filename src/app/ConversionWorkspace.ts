@@ -197,7 +197,7 @@ export class ConversionWorkspace implements InteractionTarget {
     this.source = buildSourceMesh(id);
     this.thickness = this.source.defaultThickness;
     this.simulationPaused = true;
-    this.status = `${this.source.label} loaded. Inspect it, then continue to Generate.`;
+    this.status = `Rigid ${this.source.label} solid loaded. Inspect it, then continue to Generate.`;
     this.view.configure(this.source, null, this.thickness);
     this.view.setStage('source');
     this.refresh();
@@ -290,8 +290,8 @@ export class ConversionWorkspace implements InteractionTarget {
       legend:
         this.stage === 'source'
           ? [
-              { label: 'Source vertices', color: 0xf4f6fa },
-              { label: 'Source triangle edges', color: 0x9ba8b8 },
+              { label: 'Rigid solid surface vertices', color: 0xf4f6fa },
+              { label: 'Closed solid edges', color: 0x9ba8b8 },
             ]
           : [
               { label: 'Simulation particles', color: 0xf4f6fa },

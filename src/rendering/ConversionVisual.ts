@@ -62,13 +62,15 @@ class ConversionBodyVisual implements BodyVisual {
   private generatedMaterial: THREE.MeshStandardMaterial | null = null;
   private sourceGeometry: THREE.BufferGeometry | null = null;
   private generatedGeometry: THREE.BufferGeometry | null = null;
-  private centerAttribute: THREE.BufferAttribute | null = null;
-  private generatedAttribute: THREE.BufferAttribute | null = null;
+  private sourceThickAttribute: THREE.BufferAttribute | null = null;
+  private generatedCenterAttribute: THREE.BufferAttribute | null = null;
+  private generatedThickAttribute: THREE.BufferAttribute | null = null;
   private sourceOverlay: ParticleOverlay | null = null;
   private generatedOverlay: ParticleOverlay | null = null;
   private sourceEdges: Uint32Array<ArrayBufferLike> = new Uint32Array();
   private thickPositions = new Float32Array();
   private centerPositions = new Float32Array();
+  private generatedThickPositions = new Float32Array();
 
   constructor(source: SourceMesh) {
     this.configure(source, null, source.defaultThickness);
@@ -80,17 +82,18 @@ class ConversionBodyVisual implements BodyVisual {
     this.converted = converted;
     this.thickness = thickness;
     this.centerPositions = source.positions.slice();
-    this.sourceEdges = uniqueEdges(source.triangles);
-
     const thick = buildThickIndices(source.positions.length / 3, source.triangles, boundaryEdges(source.triangles));
+    this.sourceEdges = uniqueEdges(thick);
     this.thickPositions = new Float32Array((source.positions.length / 3) * 2 * 3);
     this.sourceGeometry = new THREE.BufferGeometry();
-    this.sourceGeometry.setAttribute('position', new THREE.BufferAttribute(this.thickPositions, 3));
+    this.sourceThickAttribute = new THREE.BufferAttribute(this.thickPositions, 3);
+    this.sourceThickAttribute.setUsage(THREE.DynamicDrawUsage);
+    this.sourceGeometry.setAttribute('position', this.sourceThickAttribute);
     this.sourceGeometry.setIndex(new THREE.BufferAttribute(thick, 1));
     this.sourceMaterial = new THREE.MeshStandardMaterial({
       color: source.color,
-      roughness: source.id === 'car-shell' ? 0.28 : 0.78,
-      metalness: source.id === 'car-shell' ? 0.75 : 0.02,
+      roughness: source.id === 'car-shell' ? 0.28 : 0.46,
+      metalness: source.id === 'car-shell' ? 0.75 : 0.2,
       side: THREE.DoubleSide,
     });
     this.sourceMesh = new THREE.Mesh(this.sourceGeometry, this.sourceMaterial);
@@ -99,17 +102,23 @@ class ConversionBodyVisual implements BodyVisual {
     this.sourceMesh.frustumCulled = false;
     this.object.add(this.sourceMesh);
 
-    this.centerAttribute = new THREE.BufferAttribute(this.centerPositions, 3);
-    this.centerAttribute.setUsage(THREE.DynamicDrawUsage);
-    this.sourceOverlay = createParticleOverlay(this.centerAttribute, this.sourceEdges, 0.025);
+    this.sourceOverlay = createParticleOverlay(this.sourceThickAttribute, this.sourceEdges, 0.025);
     this.object.add(this.sourceOverlay.object);
 
     if (converted) {
-      this.generatedAttribute = new THREE.BufferAttribute(converted.positions.slice(), 3);
-      this.generatedAttribute.setUsage(THREE.DynamicDrawUsage);
+      this.generatedCenterAttribute = new THREE.BufferAttribute(converted.positions.slice(), 3);
+      this.generatedCenterAttribute.setUsage(THREE.DynamicDrawUsage);
+      const generatedIndices = buildThickIndices(
+        converted.positions.length / 3,
+        converted.triangles,
+        converted.boundaryPairs,
+      );
+      this.generatedThickPositions = new Float32Array(converted.positions.length * 2);
+      this.generatedThickAttribute = new THREE.BufferAttribute(this.generatedThickPositions, 3);
+      this.generatedThickAttribute.setUsage(THREE.DynamicDrawUsage);
       this.generatedGeometry = new THREE.BufferGeometry();
-      this.generatedGeometry.setAttribute('position', this.generatedAttribute);
-      this.generatedGeometry.setIndex(new THREE.BufferAttribute(converted.triangles, 1));
+      this.generatedGeometry.setAttribute('position', this.generatedThickAttribute);
+      this.generatedGeometry.setIndex(new THREE.BufferAttribute(generatedIndices, 1));
       this.generatedGeometry.computeVertexNormals();
       this.generatedMaterial = new THREE.MeshStandardMaterial({
         color: GENERATED_COLOR,
@@ -126,11 +135,12 @@ class ConversionBodyVisual implements BodyVisual {
       this.generatedMesh = new THREE.Mesh(this.generatedGeometry, this.generatedMaterial);
       this.generatedMesh.frustumCulled = false;
       this.object.add(this.generatedMesh);
-      this.generatedOverlay = createParticleOverlay(this.generatedAttribute, converted.stretchPairs, 0.035);
+      this.generatedOverlay = createParticleOverlay(this.generatedCenterAttribute, converted.stretchPairs, 0.035);
       this.object.add(this.generatedOverlay.object);
     }
 
     this.updateThickSurface();
+    if (converted) this.updateGeneratedSurface(converted.positions);
     this.applyVisibility();
   }
 
@@ -138,11 +148,12 @@ class ConversionBodyVisual implements BodyVisual {
     const particles = frame.particles;
     if (particles && this.converted && this.stage === 'run') {
       this.bindSource(particles);
-      if (this.generatedAttribute) {
-        (this.generatedAttribute.array as Float32Array).set(particles);
-        this.generatedAttribute.needsUpdate = true;
+      if (this.generatedCenterAttribute) {
+        (this.generatedCenterAttribute.array as Float32Array).set(particles);
+        this.generatedCenterAttribute.needsUpdate = true;
       }
       this.updateThickSurface();
+      this.updateGeneratedSurface(particles);
       this.generatedOverlay?.update();
     }
   }
@@ -155,10 +166,10 @@ class ConversionBodyVisual implements BodyVisual {
     this.stage = stage;
     if (stage !== 'run') {
       this.centerPositions.set(this.source.positions);
-      if (this.generatedAttribute && this.converted) {
-        (this.generatedAttribute.array as Float32Array).set(this.converted.positions);
-        this.generatedAttribute.needsUpdate = true;
-        this.generatedGeometry?.computeVertexNormals();
+      if (this.generatedCenterAttribute && this.converted) {
+        (this.generatedCenterAttribute.array as Float32Array).set(this.converted.positions);
+        this.generatedCenterAttribute.needsUpdate = true;
+        this.updateGeneratedSurface(this.converted.positions);
       }
       this.updateThickSurface();
     }
@@ -189,13 +200,12 @@ class ConversionBodyVisual implements BodyVisual {
           particles[a * 3 + axis] * wa + particles[b * 3 + axis] * wb + particles[c * 3 + axis] * wc;
       }
     }
-    if (this.centerAttribute) this.centerAttribute.needsUpdate = true;
   }
 
   private updateThickSurface(): void {
     const count = this.centerPositions.length / 3;
     const normals = vertexNormals(this.centerPositions, this.source.triangles);
-    const half = this.thickness * 0.5;
+    const half = this.source.solidThickness * 0.5;
     for (let i = 0; i < count; i++) {
       for (let axis = 0; axis < 3; axis++) {
         const center = this.centerPositions[i * 3 + axis];
@@ -204,10 +214,26 @@ class ConversionBodyVisual implements BodyVisual {
         this.thickPositions[(i + count) * 3 + axis] = center - offset;
       }
     }
-    const attribute = this.sourceGeometry?.getAttribute('position') as THREE.BufferAttribute | undefined;
-    if (attribute) attribute.needsUpdate = true;
+    if (this.sourceThickAttribute) this.sourceThickAttribute.needsUpdate = true;
     this.sourceGeometry?.computeVertexNormals();
     this.sourceOverlay?.update();
+  }
+
+  private updateGeneratedSurface(centers: Float32Array): void {
+    if (!this.converted || !this.generatedThickAttribute) return;
+    const count = centers.length / 3;
+    const normals = vertexNormals(centers, this.converted.triangles);
+    const half = this.thickness * 0.5;
+    for (let i = 0; i < count; i++) {
+      for (let axis = 0; axis < 3; axis++) {
+        const center = centers[i * 3 + axis];
+        const offset = normals[i * 3 + axis] * half;
+        this.generatedThickPositions[i * 3 + axis] = center + offset;
+        this.generatedThickPositions[(i + count) * 3 + axis] = center - offset;
+      }
+    }
+    this.generatedThickAttribute.needsUpdate = true;
+    this.generatedGeometry?.computeVertexNormals();
   }
 
   private applyVisibility(): void {
@@ -243,8 +269,9 @@ class ConversionBodyVisual implements BodyVisual {
     this.generatedMaterial = null;
     this.sourceOverlay = null;
     this.generatedOverlay = null;
-    this.centerAttribute = null;
-    this.generatedAttribute = null;
+    this.sourceThickAttribute = null;
+    this.generatedCenterAttribute = null;
+    this.generatedThickAttribute = null;
   }
 }
 

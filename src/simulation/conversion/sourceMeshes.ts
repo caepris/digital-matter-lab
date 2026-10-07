@@ -13,6 +13,8 @@ export interface SourceMeshMetadata {
   color: number;
   /** Rest thickness in metres, used as the shell contact gap. */
   defaultThickness: number;
+  /** Display depth of the rigid source solid before it is converted to a thin shell. */
+  solidThickness: number;
 }
 
 /** Indexed triangle surface sitting just above the platform. */
@@ -24,26 +26,26 @@ export interface SourceMesh extends SourceMeshMetadata {
 const METADATA: Record<SourceMeshId, Omit<SourceMeshMetadata, 'id'>> = {
   tshirt: {
     label: 'T-shirt',
-    description: 'Short-sleeved shirt with a scooped neck, sleeves drooping toward the cuffs.',
+    description: 'Rigid T-shirt-shaped solid with a scooped neck and short sleeves.',
     color: 0x3e7cb1,
     defaultThickness: 0.008,
+    solidThickness: 0.14,
   },
   curtain: {
     label: 'Curtain',
-    description: 'Hanging drape gathered along the top rod, with deep vertical folds toward the hem.',
+    description: 'Rigid curtain-shaped solid with deep vertical folds.',
     color: 0xc4a574,
     defaultThickness: 0.006,
+    solidThickness: 0.1,
   },
   'car-shell': {
     label: 'Car shell',
-    description: 'Open body shell with a hood, cabin, trunk, and four wheel-arch openings.',
+    description: 'Rigid car-body-shaped solid with a hood, cabin, trunk, and wheel arches.',
     color: 0xb23a2f,
     defaultThickness: 0.018,
+    solidThickness: 0.12,
   },
 };
-
-/** Clearance above the platform top (y = 0) so the shell does not start interpenetrating it. */
-const PLATFORM_CLEARANCE = 0.02;
 
 export function isSourceMeshId(id: string): id is SourceMeshId {
   return (SOURCE_MESH_IDS as readonly string[]).includes(id);
@@ -62,7 +64,7 @@ export function listSourceMeshes(): SourceMeshMetadata[] {
 export function buildSourceMesh(id: SourceMeshId): SourceMesh {
   const metadata = sourceMeshMetadata(id);
   const built = id === 'tshirt' ? buildTshirt() : id === 'curtain' ? buildCurtain() : buildCarShell();
-  placeOverPlatform(built.positions);
+  placeOverPlatform(built.positions, metadata.solidThickness * 0.5 + 0.01);
   return {
     ...metadata,
     positions: new Float32Array(built.positions),
@@ -75,7 +77,7 @@ interface BuiltMesh {
   triangles: number[];
 }
 
-function placeOverPlatform(positions: number[]): void {
+function placeOverPlatform(positions: number[], clearance: number): void {
   let minX = Infinity;
   let maxX = -Infinity;
   let minY = Infinity;
@@ -89,7 +91,7 @@ function placeOverPlatform(positions: number[]): void {
     maxZ = Math.max(maxZ, positions[i + 2]);
   }
   const shiftX = -0.5 * (minX + maxX);
-  const shiftY = PLATFORM_CLEARANCE - minY;
+  const shiftY = clearance - minY;
   const shiftZ = -0.5 * (minZ + maxZ);
   for (let i = 0; i < positions.length; i += 3) {
     positions[i] += shiftX;

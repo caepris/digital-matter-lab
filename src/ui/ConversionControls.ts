@@ -6,17 +6,17 @@ export const CONVERSION_SOURCES = [
   {
     id: 'tshirt',
     label: 'T-shirt',
-    description: 'A garment-shaped volumetric mesh with a torso and sleeves.',
+    description: 'A rigid solid shaped like a T-shirt with a torso and sleeves.',
   },
   {
     id: 'curtain',
     label: 'Curtain',
-    description: 'A hanging sheet with vertical folds.',
+    description: 'A rigid solid shaped like a curtain with vertical folds.',
   },
   {
     id: 'car-shell',
     label: 'Car shell',
-    description: 'A hollow metal vehicle body.',
+    description: 'A rigid solid shaped like a metal vehicle body.',
   },
 ] as const;
 
@@ -77,7 +77,7 @@ const SIM_TOOLS: { id: ToolId; label: string; hint: string }[] = [
 ];
 
 const STAGE_HINTS: Record<ConversionStage, string> = {
-  source: 'Choose a volumetric mesh. Structure shows its vertices.',
+  source: 'Choose a rigid solid mesh. Structure shows the vertices on its closed surface.',
   generate: 'Set a thickness in centimeters, then generate a thin simulatable shell.',
   run: '',
 };
@@ -126,7 +126,7 @@ export class ConversionControls {
     const heading = element('div', 'panel-heading');
     heading.append(
       element('h2', 'panel-title', 'Thin mesh conversion'),
-      element('p', 'panel-subtitle', 'Pick a volumetric mesh, generate a thin shell, then simulate that shell.'),
+      element('p', 'panel-subtitle', 'Pick a rigid solid mesh, generate a thin shell, then simulate that shell.'),
     );
 
     const stageBar = element('div', 'editor-topbar');
@@ -147,7 +147,7 @@ export class ConversionControls {
         const match = CONVERSION_SOURCES.find((item) => item.id === value);
         if (match) handlers.onSource(match.id);
       },
-      'Source mesh',
+      'Rigid source mesh',
     );
     this.sourceSelect.dataset.testid = 'source-select';
     this.structure = this.check('Structure', 'structure-toggle', handlers.onStructure);
@@ -289,7 +289,7 @@ export class ConversionControls {
     this.resetButton.disabled = !run;
     for (const button of this.toolButtons.values()) button.disabled = !run;
 
-    this.sourceSelect.title = source ? 'Volumetric mesh to convert' : 'Switch to Source to change the mesh';
+    this.sourceSelect.title = source ? 'Rigid solid mesh to convert' : 'Switch to Source to change the mesh';
     this.structure.title = source ? 'Show source mesh vertices' : 'Show generated simulation vertices and constraints';
     this.thickness.title = generate ? 'Simulated shell thickness' : 'Switch to Generate to set thickness';
     this.generateShell.title = generate ? 'Build a thin simulatable shell' : 'Switch to Generate to build the shell';

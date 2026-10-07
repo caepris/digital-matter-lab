@@ -139,8 +139,7 @@ function expectSurface(mesh: SourceMesh): void {
   const box = bounds(mesh);
   expect((box.min[0] + box.max[0]) / 2).toBeCloseTo(0, 5);
   expect((box.min[2] + box.max[2]) / 2).toBeCloseTo(0, 5);
-  expect(box.min[1]).toBeGreaterThanOrEqual(0);
-  expect(box.min[1]).toBeLessThan(0.05);
+  expect(box.min[1]).toBeCloseTo(mesh.solidThickness * 0.5 + 0.01, 5);
   expect(Math.abs(box.min[0])).toBeLessThanOrEqual(PLATFORM_HALF);
   expect(box.max[0]).toBeLessThanOrEqual(PLATFORM_HALF);
   expect(Math.abs(box.min[2])).toBeLessThanOrEqual(PLATFORM_HALF);
@@ -161,6 +160,8 @@ describe('source mesh catalog', () => {
       expect(metadata.color).toBeGreaterThan(0);
       expect(metadata.defaultThickness).toBeGreaterThan(0);
       expect(metadata.defaultThickness).toBeLessThan(0.05);
+      expect(metadata.solidThickness).toBeGreaterThan(metadata.defaultThickness);
+      expect(metadata.solidThickness).toBeLessThan(0.2);
       colors.add(metadata.color);
     }
     expect(colors.size).toBe(SOURCE_MESH_IDS.length);
