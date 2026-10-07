@@ -134,6 +134,19 @@ export const SHELL_PRESETS: ShellPreset[] = [
     substeps: 12,
     plastic: { yieldStrain: 0.08, creep: 0.1, maxStrain: 0.9 },
   },
+  {
+    id: 'sheet-metal',
+    label: 'Sheet metal',
+    description: 'A stiff thin sheet. Strong impacts leave permanent dents and creases.',
+    color: 0x9ba8b8,
+    stretchCompliance: 0.00002,
+    compressionCompliance: 0.00005,
+    bendCompliance: 0.001,
+    damping: 2.2,
+    friction: 0.75,
+    substeps: 14,
+    plastic: { yieldStrain: 0.025, creep: 0.14, maxStrain: 0.45 },
+  },
 ];
 
 export const ASSEMBLY_PRESETS: AssemblyPreset[] = [

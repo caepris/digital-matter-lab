@@ -96,11 +96,13 @@ body,
   display: none;
 }
 
-.assembly-grid {
+.assembly-grid,
+.conversion-grid {
   grid-template-columns: minmax(0, 1fr);
 }
 
-.assembly-grid .panel {
+.assembly-grid .panel,
+.conversion-grid .panel {
   width: min(100%, 1100px);
   justify-self: center;
   display: grid;
@@ -108,7 +110,8 @@ body,
   grid-template-rows: minmax(0, 1fr);
 }
 
-.assembly-grid .assembly-editor.panel-controls {
+.assembly-grid .assembly-editor.panel-controls,
+.conversion-grid .conversion-editor.panel-controls {
   display: flex;
   flex-direction: column;
   align-items: stretch;
@@ -129,7 +132,8 @@ body,
   flex: 0 0 auto;
 }
 
-.assembly-grid .assembly-viewport {
+.assembly-grid .assembly-viewport,
+.conversion-grid .conversion-viewport {
   min-width: 0;
   min-height: 0;
 }
@@ -581,7 +585,8 @@ button:focus-visible,
     padding-inline: 10px;
   }
 
-  .assembly-grid .panel {
+  .assembly-grid .panel,
+  .conversion-grid .panel {
     grid-template-columns: minmax(270px, 310px) minmax(0, 1fr);
   }
 }
@@ -592,11 +597,13 @@ button:focus-visible,
     gap: 8px;
   }
 
-  .assembly-grid .panel {
+  .assembly-grid .panel,
+  .conversion-grid .panel {
     display: flex;
   }
 
-  .assembly-grid .assembly-editor.panel-controls {
+  .assembly-grid .assembly-editor.panel-controls,
+  .conversion-grid .conversion-editor.panel-controls {
     max-height: 48vh;
     border-right: none;
     border-bottom: 1px solid var(--border);

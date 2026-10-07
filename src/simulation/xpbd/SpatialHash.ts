@@ -3,6 +3,8 @@ export class SpatialHash {
   private readonly tableSize: number;
   private readonly cellStart: Int32Array;
   private readonly cellEntries: Int32Array;
+  private readonly queryMarks: Int32Array;
+  private queryStamp = 0;
   readonly queryIds: Int32Array;
   querySize = 0;
 
@@ -14,6 +16,7 @@ export class SpatialHash {
     this.cellStart = new Int32Array(this.tableSize + 1);
     this.cellEntries = new Int32Array(maxObjects);
     this.queryIds = new Int32Array(maxObjects);
+    this.queryMarks = new Int32Array(maxObjects);
   }
 
   private hashCoords(xi: number, yi: number, zi: number): number {
@@ -62,12 +65,22 @@ export class SpatialHash {
     const y1 = this.cell(positions[index * 3 + 1] + maxDistance);
     const z1 = this.cell(positions[index * 3 + 2] + maxDistance);
     this.querySize = 0;
+    this.queryStamp++;
+    if (this.queryStamp === 0x7fffffff) {
+      this.queryMarks.fill(0);
+      this.queryStamp = 1;
+    }
     for (let xi = x0; xi <= x1; xi++) {
       for (let yi = y0; yi <= y1; yi++) {
         for (let zi = z0; zi <= z1; zi++) {
           const h = this.hashCoords(xi, yi, zi);
           for (let i = this.cellStart[h]; i < this.cellStart[h + 1]; i++) {
-            this.queryIds[this.querySize++] = this.cellEntries[i];
+            const id = this.cellEntries[i];
+            // Distinct grid cells can hash to the same bucket. Return each object once so
+            // callers never overrun the fixed-size query buffer or solve a contact repeatedly.
+            if (this.queryMarks[id] === this.queryStamp) continue;
+            this.queryMarks[id] = this.queryStamp;
+            this.queryIds[this.querySize++] = id;
           }
         }
       }

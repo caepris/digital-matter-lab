@@ -15,6 +15,14 @@ shape, volume parts use tetrahedra, and sheets use cloth constraints. Welds are
 zero-compliance barycentric constraints, so rotated parts stay joined. Unwelded parts
 still collide. Returning to Edit restores the authored transforms.
 
+The **Thin conversion** tab demonstrates the render-mesh-to-simulation-mesh workflow.
+Choose a T-shirt, curtain, or metal car shell, inspect its source vertices, set a visible
+and physical thickness, and generate a reduced fitted surface. The generated shell derives
+stretch and bending constraints from triangle adjacency. In Run, barycentric bindings make
+the detailed source mesh follow that shell while Grab, Drop, and Press act on the simulation
+particles. Structure switches between source vertices and generated shell particles based
+on the current stage.
+
 The editor's numbered sidebar guides the workflow: configure and place a part, select it
 from the viewport or part list, transform it, then join touching parts. Position, rotation,
 scale, material, duplicate, delete, snapping, history, and structure controls remain
@@ -53,8 +61,8 @@ Each panel is independent and has its own controls:
 - **Structure**: reveal how the body is built (collider frame and axes, tetrahedral lattice, or cloth mesh).
 - **Reset**: restore that panel, including any permanent plastic deformation.
 
-Use the **Comparison** and **Assembly** tabs to switch workspaces. Hidden simulations are
-paused. In Assembly, switch to **Simulate**, then press **Play** for Grab, Drop, and Press.
+Use the **Comparison**, **Assembly**, and **Thin conversion** tabs to switch workspaces.
+Hidden simulations are paused. In Assembly, switch to **Simulate**, then press **Play** for Grab, Drop, and Press.
 Pause to inspect the result; Restart restores the authored assembly and pauses again. Camera
 orbit, pan, and zoom remain available while simulating. **Structure**
 works in both Edit and Simulate: it fades the parts and draws every simulated vertex
@@ -67,6 +75,7 @@ works in both Edit and Simulate: it fades the parts and draws every simulated ve
 - `src/simulation/volume`, `src/simulation/shell`: mesh builders and solvers for the two deformable bodies.
 - `src/assembly-editor`: authored assembly documents, undo history, and weld brushing.
 - `src/simulation/assembly`: part meshes, compilation, and the mixed-material solver.
+- `src/simulation/conversion`: procedural source meshes, surface reduction/binding, and the arbitrary thin-shell solver.
 - `src/materials/presets.ts`: all tunable material parameters.
 - `src/rendering`: per-panel scenes, body visuals, and structure overlays, drawn as scissored viewports of one WebGL canvas.
 - `src/interaction`, `src/ui`, `src/app`: pointer routing, panel controls, and app wiring.

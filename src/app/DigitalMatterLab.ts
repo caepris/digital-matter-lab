@@ -5,6 +5,7 @@ import type { SimulationStats, ToolId } from '../simulation/types';
 import { AssemblyWorkspace } from './AssemblyWorkspace';
 import type { PanelDefinition } from './MatterPanel';
 import { MatterPanel } from './MatterPanel';
+import { ConversionWorkspace } from './ConversionWorkspace';
 
 const PAGE_BACKGROUND = 0x0d0f12;
 
@@ -32,9 +33,15 @@ export interface LabTestHook {
     cameraPosition(): number[];
     screenPoint(x: number, y: number, z: number): { x: number; y: number };
   };
+  conversion: {
+    stage(): 'source' | 'generate' | 'run';
+    sourceId(): string;
+    thickness(): number;
+    simulationVertexCount(): number;
+  };
 }
 
-export type WorkspaceId = 'comparison' | 'assembly';
+export type WorkspaceId = 'comparison' | 'assembly' | 'conversion';
 
 declare global {
   interface Window {
@@ -45,12 +52,14 @@ declare global {
 export class DigitalMatterLab {
   private readonly renderer: THREE.WebGLRenderer;
   private readonly canvas: HTMLCanvasElement;
-  private readonly panels: Array<MatterPanel | AssemblyWorkspace>;
+  private readonly panels: Array<MatterPanel | AssemblyWorkspace | ConversionWorkspace>;
   private readonly router: InteractionRouter;
   private readonly comparisonPanels: MatterPanel[];
   private readonly assemblyPanels: AssemblyWorkspace[];
+  private readonly conversionPanels: ConversionWorkspace[];
   private comparisonWorkspace!: HTMLElement;
   private assemblyWorkspace!: HTMLElement;
+  private conversionWorkspace!: HTMLElement;
   private readonly tabButtons = new Map<WorkspaceId, HTMLButtonElement>();
   private activeWorkspace: WorkspaceId = 'comparison';
   private readonly runner = new SimulationRunner({ fixedDt: 1 / 60, maxStepsPerFrame: 3 });
@@ -73,7 +82,8 @@ export class DigitalMatterLab {
       .filter((definition) => definition.kind !== 'assembly')
       .map((definition) => new MatterPanel(definition, this.canvas));
     this.assemblyPanels = [new AssemblyWorkspace(this.canvas, () => this.activeWorkspace === 'assembly')];
-    this.panels = [...this.comparisonPanels, ...this.assemblyPanels];
+    this.conversionPanels = [new ConversionWorkspace(this.canvas, () => this.activeWorkspace === 'conversion')];
+    this.panels = [...this.comparisonPanels, ...this.assemblyPanels, ...this.conversionPanels];
 
     root.append(this.canvas, this.createLayout());
     this.router = new InteractionRouter(this.canvas, () => this.activePanels());
@@ -102,7 +112,7 @@ export class DigitalMatterLab {
     header.innerHTML = `
       <div>
         <h1>Digital Matter Lab</h1>
-        <p>Compare individual matter, then test how different materials behave when permanently welded.</p>
+        <p>Compare matter, weld mixed materials, and turn detailed meshes into thin simulation shells.</p>
       </div>`;
 
     const tabs = document.createElement('div');
@@ -112,6 +122,7 @@ export class DigitalMatterLab {
     for (const [workspace, label] of [
       ['comparison', 'Comparison'],
       ['assembly', 'Assembly'],
+      ['conversion', 'Thin conversion'],
     ] as const) {
       const button = document.createElement('button');
       button.type = 'button';
@@ -146,12 +157,20 @@ export class DigitalMatterLab {
     this.assemblyWorkspace.setAttribute('aria-labelledby', 'assembly-tab');
     this.assemblyWorkspace.hidden = true;
     for (const panel of this.assemblyPanels) this.assemblyWorkspace.append(panel.element);
-    workspaceHost.append(this.comparisonWorkspace, this.assemblyWorkspace);
+
+    this.conversionWorkspace = document.createElement('section');
+    this.conversionWorkspace.className = 'panel-grid conversion-grid';
+    this.conversionWorkspace.id = 'conversion-workspace';
+    this.conversionWorkspace.setAttribute('role', 'tabpanel');
+    this.conversionWorkspace.setAttribute('aria-labelledby', 'conversion-tab');
+    this.conversionWorkspace.hidden = true;
+    for (const panel of this.conversionPanels) this.conversionWorkspace.append(panel.element);
+    workspaceHost.append(this.comparisonWorkspace, this.assemblyWorkspace, this.conversionWorkspace);
 
     const footer = document.createElement('footer');
     footer.className = 'lab-footer';
     footer.textContent =
-      'Comparison: Grab, Drop, and Press. Assembly: place parts, paint welds, then simulate.';
+      'Comparison: test matter. Assembly: weld materials. Thin conversion: generate a shell proxy, then simulate it.';
 
     layout.append(header, tabs, workspaceHost, footer);
     return layout;
@@ -164,7 +183,9 @@ export class DigitalMatterLab {
     this.activeWorkspace = workspace;
     this.comparisonWorkspace.hidden = workspace !== 'comparison';
     this.assemblyWorkspace.hidden = workspace !== 'assembly';
+    this.conversionWorkspace.hidden = workspace !== 'conversion';
     for (const panel of this.assemblyPanels) panel.setActive(workspace === 'assembly');
+    for (const panel of this.conversionPanels) panel.setActive(workspace === 'conversion');
     for (const [id, button] of this.tabButtons) {
       const selected = id === workspace;
       button.setAttribute('aria-selected', String(selected));
@@ -174,16 +195,23 @@ export class DigitalMatterLab {
     this.tabButtons.get(workspace)?.focus();
   }
 
-  private activePanels(): Array<MatterPanel | AssemblyWorkspace> {
-    return this.activeWorkspace === 'comparison' ? this.comparisonPanels : this.assemblyPanels;
+  private activePanels(): Array<MatterPanel | AssemblyWorkspace | ConversionWorkspace> {
+    if (this.activeWorkspace === 'comparison') return this.comparisonPanels;
+    return this.activeWorkspace === 'assembly' ? this.assemblyPanels : this.conversionPanels;
   }
 
   private onTabKeyDown = (event: KeyboardEvent): void => {
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
     event.preventDefault();
-    const workspace: WorkspaceId =
-      event.key === 'ArrowRight' || event.key === 'End' ? 'assembly' : 'comparison';
-    this.setWorkspace(workspace);
+    const workspaces: WorkspaceId[] = ['comparison', 'assembly', 'conversion'];
+    const current = workspaces.indexOf(this.activeWorkspace);
+    const next =
+      event.key === 'Home'
+        ? 0
+        : event.key === 'End'
+          ? workspaces.length - 1
+          : (current + (event.key === 'ArrowRight' ? 1 : -1) + workspaces.length) % workspaces.length;
+    this.setWorkspace(workspaces[next]);
   };
 
   private resize = (): void => {
@@ -262,6 +290,12 @@ export class DigitalMatterLab {
             y: bounds.top + ((1 - projected.y) / 2) * bounds.height,
           };
         },
+      },
+      conversion: {
+        stage: () => this.conversionPanels[0].stage,
+        sourceId: () => this.conversionPanels[0].sourceId,
+        thickness: () => this.conversionPanels[0].thickness,
+        simulationVertexCount: () => this.conversionPanels[0].simulationVertexCount,
       },
     };
   }
