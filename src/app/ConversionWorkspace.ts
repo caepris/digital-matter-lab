@@ -16,7 +16,7 @@ import {
   ConversionControls,
   type ConversionControlModel,
   type ConversionSourceId,
-  type ConversionStage,
+  type ConversionView,
 } from '../ui/ConversionControls';
 
 const ACCENT = 0x5cc4a8;
@@ -47,17 +47,25 @@ export class ConversionWorkspace implements InteractionTarget {
   readonly element: HTMLElement;
   readonly viewport: HTMLElement;
   readonly kind = 'conversion' as const;
-  readonly state = { tool: 'grab' as ToolId, presetId: 'converted', structureVisible: false };
+  readonly state = {
+    tool: 'grab' as ToolId,
+    presetId: 'converted',
+    structureVisible: false,
+    sectionVisible: false,
+    view: 'shell' as ConversionView,
+  };
   readonly view: ConversionVisual;
-  stage: ConversionStage = 'source';
   sourceId: ConversionSourceId = 'tshirt';
   thickness: number;
   private source: SourceMesh;
   private converted: ConvertedSurface | null = null;
   private shell: ConvertedShellSimulation | null = null;
   private simulationPaused = true;
+  private generating = false;
+  private generateTimer: ReturnType<typeof setTimeout> | null = null;
   private status = '';
   private activeTool: ToolId | null = null;
+  private sectionDragging = false;
   private readonly controls: ConversionControls;
   private readonly orbit: OrbitControls;
 
@@ -69,15 +77,23 @@ export class ConversionWorkspace implements InteractionTarget {
     this.thickness = this.source.defaultThickness;
     this.view = new ConversionVisual(this.source, ACCENT);
     this.controls = new ConversionControls({
-      onStage: (stage) => this.setStage(stage),
       onSource: (id) => this.setSource(id),
+      onView: (view) => {
+        this.state.view = view;
+        this.view.setView(view);
+        this.refresh();
+      },
       onStructure: (visible) => {
         this.state.structureVisible = visible;
         this.view.setStructureVisible(visible);
         this.refresh();
       },
+      onSection: (visible) => {
+        this.state.sectionVisible = visible;
+        this.view.setSectionVisible(visible);
+        this.refresh();
+      },
       onThickness: (thickness, commit) => this.setThickness(thickness, commit),
-      onGenerate: () => this.generate(),
       onSimulationPaused: (paused) => {
         this.simulationPaused = paused;
         this.refresh();
@@ -107,7 +123,7 @@ export class ConversionWorkspace implements InteractionTarget {
     };
     this.orbit.enabled = false;
     this.frameSource();
-    this.refresh();
+    this.scheduleGenerate();
   }
 
   private frameSource(): void {
@@ -140,6 +156,14 @@ export class ConversionWorkspace implements InteractionTarget {
     return this.converted ? this.converted.positions.length / 3 : 0;
   }
 
+  get sectionVisible(): boolean {
+    return this.state.sectionVisible;
+  }
+
+  get sectionPosition(): number {
+    return this.view.sectionPosition;
+  }
+
   viewportRect(): ViewportRect {
     const canvasBounds = this.canvas.getBoundingClientRect();
     const bounds = this.viewport.getBoundingClientRect();
@@ -157,17 +181,22 @@ export class ConversionWorkspace implements InteractionTarget {
   }
 
   step(dt: number): void {
-    if (this.stage === 'run' && !this.simulationPaused) this.shell?.step(dt);
+    if (!this.simulationPaused) this.shell?.step(dt);
   }
 
   render(renderer: THREE.WebGLRenderer, alpha: number): void {
-    const frame = this.stage === 'run' && this.shell ? this.shell.frame(alpha) : emptyFrame;
-    this.view.render(frame, this.stage === 'run' && this.state.tool === 'press');
+    const frame = this.shell ? this.shell.frame(alpha) : emptyFrame;
+    this.view.render(frame, this.shell !== null && this.state.tool === 'press');
     renderer.render(this.view.panel.scene, this.view.camera);
   }
 
   pointerDown(ray: THREE.Ray): boolean {
-    if (this.stage !== 'run' || !this.shell) return false;
+    if (this.state.sectionVisible && this.view.beginSectionDrag(ray)) {
+      this.sectionDragging = true;
+      this.viewport.classList.add('is-interacting');
+      return true;
+    }
+    if (!this.shell) return false;
     if (this.state.tool === 'grab') {
       if (!this.shell.beginGrab(ray)) return false;
     } else if (this.state.tool === 'drop') {
@@ -183,10 +212,15 @@ export class ConversionWorkspace implements InteractionTarget {
   }
 
   pointerMove(ray: THREE.Ray): void {
+    if (this.sectionDragging) {
+      this.view.updateSectionDrag(ray);
+      return;
+    }
     if (this.activeTool === 'grab') this.shell?.updateGrab(ray);
   }
 
   pointerUp(): void {
+    this.sectionDragging = false;
     if (this.activeTool === 'grab') this.shell?.endGrab();
     if (this.activeTool === 'press') this.shell?.setPressActive(false);
     this.activeTool = null;
@@ -194,24 +228,11 @@ export class ConversionWorkspace implements InteractionTarget {
   }
 
   dispose(): void {
+    if (this.generateTimer !== null) clearTimeout(this.generateTimer);
     this.pointerUp();
     this.shell?.dispose();
     this.orbit.dispose();
     this.view.dispose();
-  }
-
-  private setStage(stage: ConversionStage): void {
-    this.pointerUp();
-    if (stage === 'run' && (!this.converted || !this.shell)) {
-      this.stage = 'generate';
-      this.status = 'Generate a shell before entering Run.';
-    } else {
-      this.stage = stage;
-      if (stage === 'run') this.simulationPaused = true;
-      this.status = '';
-    }
-    this.view.setStage(this.stage);
-    this.refresh();
   }
 
   private setSource(id: ConversionSourceId): void {
@@ -223,32 +244,37 @@ export class ConversionWorkspace implements InteractionTarget {
     this.source = buildSourceMesh(id);
     this.thickness = this.source.defaultThickness;
     this.simulationPaused = true;
-    this.status = `Rigid ${this.source.label} solid loaded. Inspect it, then continue to Generate.`;
     this.view.configure(this.source, null, this.thickness);
-    this.view.setStage('source');
+    this.syncView();
     this.frameSource();
-    this.refresh();
+    this.scheduleGenerate();
   }
 
   private setThickness(thickness: number, commit: boolean): void {
     this.thickness = THREE.MathUtils.clamp(thickness, 0.002, 0.08);
-    if (this.converted) {
-      this.shell?.dispose();
-      this.shell = null;
-      this.converted = null;
-      this.simulationPaused = true;
-      this.status = 'Thickness changed. Generate the shell again.';
-    } else if (commit) {
-      this.status = 'Thickness set. Generate the fitted shell.';
-    }
-    this.view.configure(this.source, this.converted, this.thickness);
-    this.view.setStage(this.stage);
-    this.view.setStructureVisible(this.state.structureVisible);
+    this.shell?.setThickness(this.thickness);
+    this.view.setThickness(this.thickness);
+    this.status = commit && this.shell
+      ? `Thickness is now ${(this.thickness * 100).toFixed(1)} cm. Fill and bending stiffness updated live.`
+      : '';
     this.refresh();
+  }
+
+  /** Deferred so the source swap paints before the conversion work blocks the main thread. */
+  private scheduleGenerate(): void {
+    if (this.generateTimer !== null) clearTimeout(this.generateTimer);
+    this.generating = true;
+    this.status = `Generating a thin shell for the ${this.source.label}…`;
+    this.refresh();
+    this.generateTimer = setTimeout(() => {
+      this.generateTimer = null;
+      this.generate();
+    }, 0);
   }
 
   private generate(): void {
     this.pointerUp();
+    this.generating = false;
     try {
       const converted = convertSurface({
         positions: this.source.positions,
@@ -261,16 +287,21 @@ export class ConversionWorkspace implements InteractionTarget {
       this.status =
         `Closed shell generated around the ${this.source.label}.` +
         (hanging > 0 ? ` ${hanging} particles hang from the ${this.sourceId === 'curtain' ? 'rod' : 'hanger'}.` : '') +
-        ' Inspect its vertices, then switch to Run.';
+        ' Press Play to simulate.';
       this.view.configure(this.source, converted, this.thickness);
-      this.view.setStage('generate');
-      this.view.setStructureVisible(this.state.structureVisible);
+      this.syncView();
     } catch (error) {
       this.converted = null;
       this.shell = null;
       this.status = `Could not generate shell: ${String(error)}`;
     }
     this.refresh();
+  }
+
+  private syncView(): void {
+    this.view.setView(this.state.view);
+    this.view.setStructureVisible(this.state.structureVisible);
+    this.view.setSectionVisible(this.state.sectionVisible);
   }
 
   private createSimulation(): void {
@@ -290,14 +321,14 @@ export class ConversionWorkspace implements InteractionTarget {
 
   private resetSimulation(): void {
     this.pointerUp();
+    const wasPaused = this.simulationPaused;
     this.createSimulation();
-    this.simulationPaused = true;
+    this.simulationPaused = wasPaused;
     if (this.converted) {
       this.view.configure(this.source, this.converted, this.thickness);
-      this.view.setStage(this.stage);
-      this.view.setStructureVisible(this.state.structureVisible);
+      this.syncView();
     }
-    this.status = 'Simulation reset and paused.';
+    this.status = wasPaused ? 'Simulation reset and paused.' : 'Simulation reset and playing.';
     this.refresh();
   }
 
@@ -308,20 +339,22 @@ export class ConversionWorkspace implements InteractionTarget {
           triangles: this.converted.triangles.length / 3,
           stretchEdges: this.converted.stretchPairs.length / 2,
           bendPairs: this.converted.bendPairs.length / 2,
-          thickness: this.thickness,
         }
       : null;
+    const showingSource = !this.converted || this.state.view === 'source';
     const model: ConversionControlModel = {
-      stage: this.stage,
       sourceId: this.sourceId,
+      view: this.state.view,
       structureVisible: this.state.structureVisible,
+      sectionVisible: this.state.sectionVisible,
       thickness: this.thickness,
       generated,
+      generating: this.generating,
       status: this.status,
       simulationPaused: this.simulationPaused,
       tool: this.state.tool,
       legend:
-        this.stage === 'source'
+        showingSource
           ? [
               { label: 'Rigid solid surface vertices', color: 0xf4f6fa },
               { label: 'Closed solid edges', color: 0x9ba8b8 },

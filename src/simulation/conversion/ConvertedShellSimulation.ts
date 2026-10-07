@@ -33,11 +33,12 @@ export class ConvertedShellSimulation extends XpbdSimulation<ShellPreset> {
   readonly stretch: DistanceConstraints;
   readonly bend: DistanceConstraints;
   readonly structure: DistanceConstraints | null;
-  readonly thickness: number;
+  thickness: number;
   /** Separation kept between non-adjacent particles; at least the shell thickness. */
-  readonly contactDistance: number;
+  contactDistance: number;
   readonly pinned: readonly number[];
-  private readonly hash: SpatialHash;
+  private hash: SpatialHash;
+  private readonly meanEdgeLength: number;
   private readonly ignored = new Set<number>();
 
   constructor(options: ConvertedShellSimulationOptions) {
@@ -62,7 +63,6 @@ export class ConvertedShellSimulation extends XpbdSimulation<ShellPreset> {
       grabRadius: 0.28,
       startJitter: 0.001,
     });
-    this.thickness = thickness;
     this.stretch = new DistanceConstraints(mesh.stretchPairs, mesh.positions);
     this.bend = new DistanceConstraints(mesh.bendPairs, mesh.positions);
     this.structure = options.structural
@@ -74,13 +74,24 @@ export class ConvertedShellSimulation extends XpbdSimulation<ShellPreset> {
 
     let edgeLength = 0;
     for (let i = 0; i < this.stretch.count; i++) edgeLength += this.stretch.rest[i];
-    edgeLength /= Math.max(1, this.stretch.count);
-    this.contactDistance = Math.max(thickness, edgeLength * 0.45);
+    this.meanEdgeLength = edgeLength / Math.max(1, this.stretch.count);
+    this.thickness = thickness;
+    this.contactDistance = thickness;
+    this.hash = new SpatialHash(thickness, this.count);
+    this.setThickness(thickness);
+  }
+
+  /** Changes visual/contact thickness and cubic bending stiffness without resetting deformation. */
+  setThickness(thickness: number): void {
+    this.thickness = Math.max(MIN_THICKNESS, thickness);
+    this.contactDistance = Math.max(this.thickness, this.meanEdgeLength * 0.45);
     this.hash = new SpatialHash(this.contactDistance, this.count);
-    for (let i = 0; i < mesh.stretchPairs.length; i += 2) {
-      this.ignored.add(pairKey(mesh.stretchPairs[i], mesh.stretchPairs[i + 1]));
+    this.setCollisionThickness(Math.max(0.008, this.thickness * 0.5), this.thickness);
+    this.ignored.clear();
+    for (let i = 0; i < this.stretch.count; i++) {
+      this.ignored.add(pairKey(this.stretch.a[i], this.stretch.b[i]));
     }
-    this.ignoreRestContacts(mesh.positions);
+    this.ignoreRestContacts(this.restPositions);
   }
 
   /** Pairs that already start closer than the contact distance are part of the shape, not collisions. */
@@ -162,6 +173,9 @@ export class ConvertedShellSimulation extends XpbdSimulation<ShellPreset> {
   protected afterStep(): void {
     const plastic = this.preset.plastic;
     if (!plastic) return;
+    // Every rest length must be able to yield: if in-plane edges stay rigid while bend and
+    // structure lengths creep, no shape satisfies them all and the solver spins the body up.
+    applyDistancePlasticity(this.positions, this.stretch, plastic);
     applyDistancePlasticity(this.positions, this.bend, plastic);
     if (this.structure) applyDistancePlasticity(this.positions, this.structure, plastic);
   }

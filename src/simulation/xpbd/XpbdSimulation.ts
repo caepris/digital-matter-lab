@@ -46,6 +46,8 @@ export interface XpbdBodyOptions<P extends XpbdPreset> {
 
 const GRAB_COMPLIANCE = 5e-5;
 const MAX_SPEED = 25;
+/** Fast pointer flicks would otherwise slam the grabbed patch through the body in one frame. */
+const MAX_GRAB_SPEED = 6;
 /** Fraction of horizontal motion an impactor keeps per substep while touching the platform. */
 const ROLLING_RESISTANCE = 0.995;
 
@@ -53,7 +55,11 @@ interface Grab {
   indices: number[];
   offsets: number[];
   depth: number;
+  /** Picked particle minus its projection onto the pick ray, so grabbing never snaps it. */
+  rayOffset: THREE.Vector3;
   target: THREE.Vector3;
+  /** Where the grabbed patch is actually pulled; trails `target` at no more than MAX_GRAB_SPEED. */
+  anchor: THREE.Vector3;
 }
 
 export abstract class XpbdSimulation<P extends XpbdPreset> implements MatterSimulation {
@@ -133,6 +139,13 @@ export abstract class XpbdSimulation<P extends XpbdPreset> implements MatterSimu
 
   /** Optional hook for body-specific collisions such as self-collision. */
   protected solveExtraCollisions(_h: number): void {}
+
+  /** Updates contact geometry without resetting the current simulation state. */
+  protected setCollisionThickness(particleRadius: number, pressFloor: number): void {
+    this.options.particleRadius = particleRadius;
+    this.options.pressFloor = pressFloor;
+    this.press.setFloor(pressFloor);
+  }
 
   get presetId(): string {
     return this.preset.id;
@@ -295,12 +308,14 @@ export abstract class XpbdSimulation<P extends XpbdPreset> implements MatterSimu
       indices.push(i);
       offsets.push(ox, oy, oz);
     }
-    this.grab = { indices, offsets, depth: bestDepth, target: new THREE.Vector3(bx, by, bz) };
+    const target = new THREE.Vector3(bx, by, bz);
+    const rayOffset = target.clone().sub(ray.at(bestDepth, new THREE.Vector3()));
+    this.grab = { indices, offsets, depth: bestDepth, rayOffset, target, anchor: target.clone() };
     return true;
   }
 
   updateGrab(ray: THREE.Ray): void {
-    if (this.grab) ray.at(this.grab.depth, this.grab.target);
+    if (this.grab) ray.at(this.grab.depth, this.grab.target).add(this.grab.rayOffset);
   }
 
   endGrab(): void {
@@ -393,15 +408,19 @@ export abstract class XpbdSimulation<P extends XpbdPreset> implements MatterSimu
 
   private solveGrab(h: number): void {
     if (!this.grab) return;
-    const { indices, offsets, target } = this.grab;
+    const { indices, offsets, target, anchor } = this.grab;
+    const gap = anchor.distanceTo(target);
+    const maxStep = MAX_GRAB_SPEED * h;
+    if (gap > maxStep) anchor.lerp(target, maxStep / gap);
+    else anchor.copy(target);
     for (let k = 0; k < indices.length; k++) {
       solveAttachment(
         this.positions,
         this.invMass,
         indices[k],
-        target.x + offsets[k * 3],
-        target.y + offsets[k * 3 + 1],
-        target.z + offsets[k * 3 + 2],
+        anchor.x + offsets[k * 3],
+        anchor.y + offsets[k * 3 + 1],
+        anchor.z + offsets[k * 3 + 2],
         GRAB_COMPLIANCE,
         h,
       );

@@ -171,39 +171,85 @@ test('assembly tab exposes a welded mixed-material workspace', async ({ page }) 
   expect(await page.evaluate(() => window.__digitalMatterLab!.activeWorkspace())).toBe('comparison');
 });
 
-test('thin conversion generates and simulates all source meshes', async ({ page }) => {
+test('thin conversion auto-generates, edits thickness live, and simulates every source', async ({ page }) => {
   await page.getByRole('tab', { name: 'Thin conversion' }).click();
   const workspace = page.locator('[data-kind=conversion]');
   await expect(workspace.getByRole('heading', { name: 'Thin mesh conversion' })).toBeVisible();
   expect(await page.evaluate(() => window.__digitalMatterLab!.activeWorkspace())).toBe('conversion');
+  await expect(workspace.locator('[data-testid^=stage-], [data-testid^=continue-], [data-testid=generate-shell]')).toHaveCount(0);
+
+  const vertexCount = () => page.evaluate(() => window.__digitalMatterLab!.conversion.simulationVertexCount());
+  const renderedThickness = () => page.evaluate(() => window.__digitalMatterLab!.conversion.renderedThickness());
+
+  const shellStats = workspace.getByTestId('conversion-stats');
+  await expect(shellStats).toContainText('vertices');
+  expect(await vertexCount()).toBeGreaterThan(3);
+  expect(await page.evaluate(() => window.__digitalMatterLab!.conversion.view())).toBe('shell');
+  const firstSection = workspace.locator('.editor-section').first();
+  await expect(firstSection.locator('[data-view=shell]')).toBeVisible();
+  await expect(firstSection.getByTestId('section-tool')).toBeVisible();
 
   const structure = workspace.getByTestId('structure-toggle');
   await structure.check();
   await expect(structure).toBeChecked();
 
   const source = workspace.getByTestId('source-select');
-  for (const id of ['tshirt', 'curtain', 'car-shell']) {
-    await workspace.getByTestId('stage-source').click();
+  const play = workspace.getByTestId('simulation-play');
+  const thickness = workspace.getByTestId('thickness');
+  for (const id of ['curtain', 'car-shell', 'tshirt']) {
     await source.selectOption(id);
-    expect(await page.evaluate(() => window.__digitalMatterLab!.conversion.simulationVertexCount())).toBe(0);
-    await workspace.getByTestId('stage-generate').click();
-    await workspace.getByTestId('generate-shell').click();
-    await expect(workspace.getByTestId('conversion-stats')).toContainText('vertices');
-    expect(await page.evaluate(() => window.__digitalMatterLab!.conversion.simulationVertexCount())).toBeGreaterThan(3);
+    await expect.poll(() => page.evaluate(() => window.__digitalMatterLab!.conversion.sourceId())).toBe(id);
+    await expect(shellStats).toContainText('vertices');
+    expect(await vertexCount()).toBeGreaterThan(3);
+    await expect(play).toBeEnabled();
   }
 
-  await workspace.getByTestId('stage-run').click();
-  await expect(workspace.getByTestId('simulation-play')).toHaveText('Play');
-  await workspace.getByTestId('simulation-play').click();
-  await expect(workspace.getByTestId('simulation-play')).toHaveText('Pause');
-
+  await play.click();
+  await expect(play).toHaveText('Pause');
   const index = 4;
+  await expect.poll(async () => (await stats(page, index)).maxDeformation).toBeGreaterThan(0.001);
+  const vertices = await vertexCount();
+
+  await thickness.fill('6');
+  await expect(workspace.getByTestId('thickness-output')).toHaveText('6.0 cm');
+  await expect.poll(() => page.evaluate(() => window.__digitalMatterLab!.conversion.thickness())).toBeCloseTo(0.06, 4);
+  await expect.poll(renderedThickness).toBeCloseTo(0.06, 2);
+  expect(await vertexCount()).toBe(vertices);
+  await expect(play).toHaveText('Pause');
+  const running = await stats(page, index);
+  expect(running.maxDeformation).toBeGreaterThan(0.001);
+  expect(running.center.every(Number.isFinite)).toBe(true);
+
+  await workspace.getByTestId('section-tool').click();
+  await expect(workspace.getByTestId('section-tool')).toHaveAttribute('aria-pressed', 'true');
+  await play.click();
+  await expect(play).toHaveText('Play');
+  const before = await page.evaluate(() => window.__digitalMatterLab!.conversion.sectionPosition());
+  const section = await bodyPoint(page, index);
+  await page.mouse.move(section.x, section.y);
+  await page.mouse.down();
+  await page.mouse.move(section.x + 80, section.y, { steps: 6 });
+  await page.mouse.up();
+  await expect.poll(() => page.evaluate(() => window.__digitalMatterLab!.conversion.sectionPosition())).not.toBe(before);
+  await workspace.locator('[data-view=source]').click();
+  expect(await page.evaluate(() => window.__digitalMatterLab!.conversion.view())).toBe('source');
+  await expect(workspace.getByTestId('section-tool')).toHaveAttribute('aria-pressed', 'true');
+  await expect(workspace.getByTestId('section-tool')).toBeEnabled();
+  await workspace.locator('[data-view=shell]').click();
+  await workspace.getByTestId('section-tool').click();
+
+  await play.click();
   await workspace.locator('[data-tool=drop]').click();
   const target = await bodyPoint(page, index);
   await page.mouse.click(target.x, target.y - 30);
   await expect.poll(async () => (await stats(page, index)).impactorCount).toBe(1);
   await workspace.getByTestId('reset').click();
   expect((await stats(page, index)).impactorCount).toBe(0);
+  await expect(play).toHaveText('Pause');
+  await play.click();
+  await expect(play).toHaveText('Play');
+  await workspace.getByTestId('reset').click();
+  await expect(play).toHaveText('Play');
 
   await page.setViewportSize({ width: 600, height: 820 });
   await expect(workspace.getByRole('heading', { name: 'Thin mesh conversion' })).toBeVisible();

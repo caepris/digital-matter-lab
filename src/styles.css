@@ -173,6 +173,10 @@ body,
   gap: 8px;
 }
 
+.conversion-editor .action-row {
+  flex-wrap: wrap;
+}
+
 .editor-topbar {
   position: sticky;
   top: -14px;
@@ -475,7 +479,8 @@ input:disabled {
   border-left: 1px solid var(--border);
 }
 
-.tool-button.is-selected {
+.tool-button.is-selected,
+.action-button[aria-pressed='true'] {
   background: var(--accent);
   color: #101216;
   font-weight: 600;

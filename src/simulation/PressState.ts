@@ -5,7 +5,13 @@ export class PressState {
   previousBottom = PRESS_REST_BOTTOM;
   active = false;
 
-  constructor(private readonly floor: number) {}
+  constructor(private floor: number) {}
+
+  setFloor(floor: number): void {
+    this.floor = floor;
+    this.bottom = Math.max(this.bottom, floor);
+    this.previousBottom = Math.max(this.previousBottom, floor);
+  }
 
   /**
    * Moves the plate. `obstacleTop` stops it on an incompressible surface; `resistingForce`

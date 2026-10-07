@@ -1,3 +1,4 @@
+import * as THREE from 'three';
 import { describe, expect, it } from 'vitest';
 import { convertSurface } from './convertSurface';
 import { buildSourceMesh, pinnedParticles, SOURCE_MESH_IDS } from './sourceMeshes';
@@ -83,6 +84,35 @@ describe('ConvertedShellSimulation', () => {
     expect(simulation.stats().maxDeformation).toBeGreaterThan(0.02);
   });
 
+  it('changes thickness mid-simulation without resetting, and thick cloth deforms less', () => {
+    const source = buildSourceMesh('tshirt');
+    const converted = convertSurface({ positions: source.positions, triangles: source.triangles, targetSpacing: 0.1 });
+    const pinned = pinnedParticles(source, converted.positions);
+    const create = () =>
+      new ConvertedShellSimulation({ mesh: converted, thickness: 0.006, presetId: 'loose-cloth', totalMass: 0.3, pinned });
+    const thin = create();
+    const thick = create();
+    for (let i = 0; i < 20; i++) {
+      thin.step(1 / 60);
+      thick.step(1 / 60);
+    }
+    const before = thick.positions.slice();
+    const deformationBefore = thick.stats().maxDeformation;
+    expect(deformationBefore).toBeGreaterThan(0);
+
+    thick.setThickness(0.08);
+    expect(thick.thickness).toBe(0.08);
+    expect(Array.from(thick.positions)).toEqual(Array.from(before));
+    expect(thick.stats().maxDeformation).toBe(deformationBefore);
+
+    for (let i = 0; i < 120; i++) {
+      thin.step(1 / 60);
+      thick.step(1 / 60);
+    }
+    expect(thick.positions.every(Number.isFinite)).toBe(true);
+    expect(thick.stats().maxDeformation).toBeLessThan(thin.stats().maxDeformation);
+  });
+
   it('keeps a structural sheet-metal body far stiffer than cloth', () => {
     const source = buildSourceMesh('car-shell');
     const converted = convertSurface({ positions: source.positions, triangles: source.triangles, targetSpacing: 0.14 });
@@ -101,5 +131,61 @@ describe('ConvertedShellSimulation', () => {
     const cloth = settle('loose-cloth', false);
     expect(metal).toBeLessThan(0.03);
     expect(metal).toBeLessThan(cloth * 0.25);
+  });
+
+  describe('grabbing the car body', () => {
+    const camera = new THREE.Vector3(3, 2.2, 3.5);
+    const createCar = () => {
+      const source = buildSourceMesh('car-shell');
+      const converted = convertSurface({ positions: source.positions, triangles: source.triangles, targetSpacing: 0.1 });
+      const simulation = new ConvertedShellSimulation({
+        mesh: converted,
+        thickness: source.defaultThickness,
+        presetId: 'sheet-metal',
+        structural: true,
+        totalMass: 2.4,
+      });
+      for (let i = 0; i < 60; i++) simulation.step(1 / 60);
+      return simulation;
+    };
+    const rayTo = (point: THREE.Vector3) => new THREE.Ray(camera, point.clone().sub(camera).normalize());
+    const maxSpeed = (simulation: ConvertedShellSimulation) => {
+      let max = 0;
+      const v = simulation.velocities;
+      for (let i = 0; i < v.length; i += 3) max = Math.max(max, Math.hypot(v[i], v[i + 1], v[i + 2]));
+      return max;
+    };
+
+    it('does not jolt the body when grabbed without moving the pointer', () => {
+      const simulation = createCar();
+      const roof = new THREE.Vector3(0.3, 0.6, 0.3);
+      expect(simulation.beginGrab(rayTo(roof))).toBe(true);
+      simulation.updateGrab(rayTo(roof));
+      simulation.step(1 / 60);
+      expect(maxSpeed(simulation)).toBeLessThan(0.5);
+    });
+
+    it('comes to rest after being flicked and crushed instead of spinning up', () => {
+      const simulation = createCar();
+      const roof = new THREE.Vector3(0.6, 0.55, 0.2);
+      simulation.beginGrab(rayTo(roof));
+      for (let f = 0; f < 30; f++) {
+        simulation.updateGrab(rayTo(roof.clone().add(new THREE.Vector3(f % 2 ? -1.2 : 1.2, 0.8, 0))));
+        simulation.step(1 / 60);
+      }
+      for (let f = 0; f < 180; f++) {
+        const t = f / 60;
+        const target = roof.clone().add(new THREE.Vector3(-1.5 * Math.min(1, t / 2), -0.5, Math.sin(t * 4) * 0.6));
+        simulation.updateGrab(rayTo(target));
+        simulation.step(1 / 60);
+      }
+      simulation.endGrab();
+      for (let f = 0; f < 240; f++) simulation.step(1 / 60);
+
+      expect(maxSpeed(simulation)).toBeLessThan(1);
+      const center = simulation.stats().center;
+      expect(center[1]).toBeLessThan(0.6);
+      expect(Math.hypot(center[0], center[2])).toBeLessThan(2);
+    }, 30_000);
   });
 });

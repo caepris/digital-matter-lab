@@ -34,10 +34,14 @@ export interface LabTestHook {
     screenPoint(x: number, y: number, z: number): { x: number; y: number };
   };
   conversion: {
-    stage(): 'source' | 'generate' | 'run';
+    view(): 'source' | 'shell';
     sourceId(): string;
     thickness(): number;
+    /** Distance between the rendered outer and inner shell surfaces. */
+    renderedThickness(): number;
     simulationVertexCount(): number;
+    sectionVisible(): boolean;
+    sectionPosition(): number;
   };
 }
 
@@ -71,10 +75,11 @@ export class DigitalMatterLab {
     this.canvas = document.createElement('canvas');
     this.canvas.className = 'lab-canvas';
 
-    this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true });
+    this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true, stencil: true });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
+    this.renderer.localClippingEnabled = true;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.setClearColor(PAGE_BACKGROUND);
 
@@ -292,10 +297,13 @@ export class DigitalMatterLab {
         },
       },
       conversion: {
-        stage: () => this.conversionPanels[0].stage,
+        view: () => this.conversionPanels[0].state.view,
         sourceId: () => this.conversionPanels[0].sourceId,
         thickness: () => this.conversionPanels[0].thickness,
+        renderedThickness: () => this.conversionPanels[0].view.renderedHalfThickness * 2,
         simulationVertexCount: () => this.conversionPanels[0].simulationVertexCount,
+        sectionVisible: () => this.conversionPanels[0].sectionVisible,
+        sectionPosition: () => this.conversionPanels[0].sectionPosition,
       },
     };
   }

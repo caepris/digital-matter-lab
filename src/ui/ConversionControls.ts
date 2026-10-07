@@ -1,6 +1,7 @@
 import type { ToolId } from '../simulation/types';
 
-export type ConversionStage = 'source' | 'generate' | 'run';
+/** What the viewport renders: the detailed source mesh or the filled thin shell driving it. */
+export type ConversionView = 'source' | 'shell';
 
 export const CONVERSION_SOURCES = [
   {
@@ -30,8 +31,6 @@ export interface ConversionGeneratedStats {
   triangles: number;
   stretchEdges: number;
   bendPairs: number;
-  /** Thickness in meters used when this shell was generated. */
-  thickness: number;
 }
 
 export interface ConversionLegendEntry {
@@ -40,12 +39,14 @@ export interface ConversionLegendEntry {
 }
 
 export interface ConversionControlModel {
-  stage: ConversionStage;
   sourceId: ConversionSourceId;
+  view: ConversionView;
   structureVisible: boolean;
+  sectionVisible: boolean;
   /** Shell thickness in meters. The slider and readout show centimeters. */
   thickness: number;
   generated: ConversionGeneratedStats | null;
+  generating: boolean;
   status: string;
   simulationPaused: boolean;
   tool: ToolId;
@@ -53,21 +54,20 @@ export interface ConversionControlModel {
 }
 
 export interface ConversionControlHandlers {
-  onStage(stage: ConversionStage): void;
   onSource(sourceId: ConversionSourceId): void;
+  onView(view: ConversionView): void;
   onStructure(visible: boolean): void;
+  onSection(visible: boolean): void;
   /** `thickness` is meters. `commit` is false while the slider is dragged. */
   onThickness(thickness: number, commit: boolean): void;
-  onGenerate(): void;
   onSimulationPaused(paused: boolean): void;
   onReset(): void;
   onTool(tool: ToolId): void;
 }
 
-const STAGES: { id: ConversionStage; label: string }[] = [
-  { id: 'source', label: 'Source' },
-  { id: 'generate', label: 'Generate' },
-  { id: 'run', label: 'Run' },
+const VIEWS: { id: ConversionView; label: string; hint: string }[] = [
+  { id: 'shell', label: 'Thin shell', hint: 'Show the filled simulation shell' },
+  { id: 'source', label: 'Source mesh', hint: 'Show the detailed source mesh driven by the shell' },
 ];
 
 const SIM_TOOLS: { id: ToolId; label: string; hint: string }[] = [
@@ -76,12 +76,10 @@ const SIM_TOOLS: { id: ToolId; label: string; hint: string }[] = [
   { id: 'press', label: 'Press', hint: 'Hold to lower the press.' },
 ];
 
-const STAGE_HINTS: Record<ConversionStage, string> = {
-  source: 'Choose a rigid solid mesh. Structure shows the vertices on its closed surface.',
-  generate: 'Set a thickness in centimeters, then generate a closed thin shell that wraps the whole solid.',
-  run: '',
-};
-
+const SECTION_HINT = {
+  shell: 'Drag the section plane left or right to inspect the filled shell.',
+  source: 'Drag the section plane left or right to inspect the source mesh.',
+} satisfies Record<ConversionView, string>;
 const CAMERA_HINT = 'Middle-drag orbit · Right-drag pan · Scroll or trackpad zoom';
 
 function element<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text?: string): HTMLElementTagNameMap[K] {
@@ -104,17 +102,17 @@ function thicknessToCentimeters(meters: number): number {
 
 export class ConversionControls {
   readonly root = element('aside', 'panel-controls assembly-editor conversion-editor');
-  readonly hint = element('p', 'tool-hint', `${STAGE_HINTS.source} · ${CAMERA_HINT}`);
+  readonly hint = element('p', 'tool-hint', `${SIM_TOOLS[0].hint} · ${CAMERA_HINT}`);
   readonly legend = element('div', 'structure-legend');
-  private readonly stageButtons = new Map<ConversionStage, HTMLButtonElement>();
+  private readonly viewButtons = new Map<ConversionView, HTMLButtonElement>();
   private readonly toolButtons = new Map<ToolId, HTMLButtonElement>();
   private readonly sourceSelect: HTMLSelectElement;
   private readonly sourceDescription = element('p', 'context-description');
   private readonly structure: HTMLInputElement;
   private readonly thickness: HTMLInputElement;
   private readonly thicknessValue = element('output', 'value-output');
-  private readonly generateShell: HTMLButtonElement;
-  private readonly stats = element('p', 'context-description', 'No simulatable shell yet.');
+  private readonly sectionButton: HTMLButtonElement;
+  private readonly stats = element('p', 'context-description', 'Generating shell…');
   private readonly play: HTMLButtonElement;
   private readonly resetButton: HTMLButtonElement;
   private readonly status = element('p', 'assembly-status');
@@ -126,21 +124,27 @@ export class ConversionControls {
     const heading = element('div', 'panel-heading');
     heading.append(
       element('h2', 'panel-title', 'Thin mesh conversion'),
-      element('p', 'panel-subtitle', 'Pick a rigid solid mesh, generate a thin shell, then simulate that shell.'),
+      element('p', 'panel-subtitle', 'Edit the rigid source; a thin shell regenerates automatically and is always ready to simulate.'),
     );
 
-    const stageBar = element('div', 'editor-topbar');
-    const stages = this.radioGroup('Conversion stage');
-    for (const stage of STAGES) {
-      const button = this.radio(stage.label, () => handlers.onStage(stage.id));
-      button.dataset.stage = stage.id;
-      button.dataset.testid = `stage-${stage.id}`;
-      stages.append(button);
-      this.stageButtons.set(stage.id, button);
+    const display = this.section('View');
+    const views = this.radioGroup('Viewport display');
+    for (const view of VIEWS) {
+      const button = this.radio(view.label, () => handlers.onView(view.id), view.hint);
+      button.dataset.view = view.id;
+      views.append(button);
+      this.viewButtons.set(view.id, button);
     }
-    stageBar.append(stages);
+    this.sectionButton = this.button('Section view', 'section-tool', () => {
+      handlers.onSection(this.sectionButton.getAttribute('aria-pressed') !== 'true');
+    });
+    this.sectionButton.setAttribute('aria-pressed', 'false');
+    this.sectionButton.title = 'Drag a cutting plane through whichever mesh is shown';
+    const displayActions = element('div', 'action-row');
+    displayActions.append(this.sectionButton);
+    display.append(views, displayActions);
 
-    const source = this.section('1 · Source');
+    const source = this.section('Source');
     this.sourceSelect = this.select(
       CONVERSION_SOURCES.map((item) => [item.id, item.label]),
       (value) => {
@@ -150,10 +154,12 @@ export class ConversionControls {
       'Rigid source mesh',
     );
     this.sourceSelect.dataset.testid = 'source-select';
+    this.sourceSelect.title = 'Rigid solid mesh to convert. Changing it regenerates the shell.';
     this.structure = this.check('Structure', 'structure-toggle', handlers.onStructure);
+    this.structure.title = 'Show mesh vertices and edges';
     source.append(this.field('Source', this.sourceSelect), this.sourceDescription, this.structure.parentElement!);
 
-    const generate = this.section('2 · Generate');
+    const shell = this.section('Thin shell');
     this.thickness = element('input', 'brush-range');
     this.thickness.type = 'range';
     this.thickness.id = 'conversion-thickness';
@@ -163,6 +169,7 @@ export class ConversionControls {
     this.thickness.value = '1.0';
     this.thickness.dataset.testid = 'thickness';
     this.thickness.ariaLabel = 'Shell thickness in centimeters';
+    this.thickness.title = 'Adjust filled thickness and bending stiffness live';
     this.thickness.addEventListener('input', () => this.emitThickness(false));
     this.thickness.addEventListener('change', () => this.emitThickness(true));
     this.thicknessValue.htmlFor = 'conversion-thickness';
@@ -170,19 +177,21 @@ export class ConversionControls {
     this.thicknessValue.value = formatCentimeters(1);
     const thicknessField = this.field('Thickness', this.thickness);
     thicknessField.append(this.thicknessValue);
-    this.generateShell = this.button('Generate shell', 'generate-shell', handlers.onGenerate);
-    const generateActions = element('div', 'action-row');
-    generateActions.append(this.generateShell);
     this.stats.dataset.testid = 'conversion-stats';
-    generate.append(thicknessField, generateActions, this.stats);
+    shell.append(
+      thicknessField,
+      element('p', 'context-description', 'Thicker shells are filled and resist bending with thickness cubed.'),
+      this.stats,
+    );
 
-    const run = this.section('3 · Run');
+    const run = this.section('Simulate');
     const transport = element('div', 'action-row');
     this.play = element('button', 'action-button', 'Play');
     this.play.type = 'button';
     this.play.dataset.testid = 'simulation-play';
     this.play.addEventListener('click', () => handlers.onSimulationPaused(this.play.textContent === 'Pause'));
     this.resetButton = this.button('Reset', 'reset', handlers.onReset);
+    this.resetButton.title = 'Restore the shell rest shape and pause';
     transport.append(this.play, this.resetButton);
     const tools = this.radioGroup('Simulation tool');
     for (const tool of SIM_TOOLS) {
@@ -191,40 +200,45 @@ export class ConversionControls {
       tools.append(button);
       this.toolButtons.set(tool.id, button);
     }
-    run.append(
-      element('p', 'context-description', 'Simulation starts paused. Play drives the source mesh with the generated shell.'),
-      transport,
-      tools,
-    );
+    run.append(transport, tools);
 
     this.status.dataset.testid = 'conversion-status';
     this.status.setAttribute('role', 'status');
     this.status.setAttribute('aria-live', 'polite');
     this.legend.hidden = true;
-    this.root.append(heading, stageBar, source, generate, run, this.status);
-    this.applyStage('source');
+    this.root.append(heading, display, source, shell, run, this.status);
   }
 
   sync(model: ConversionControlModel): void {
-    this.syncRadios(this.stageButtons, model.stage);
+    this.syncRadios(this.viewButtons, model.view);
     this.syncRadios(this.toolButtons, model.tool);
-    this.applyStage(model.stage);
 
     this.sourceSelect.value = model.sourceId;
     this.sourceDescription.textContent = CONVERSION_SOURCES.find((item) => item.id === model.sourceId)?.description ?? '';
     this.structure.checked = model.structureVisible;
+    this.sectionButton.setAttribute('aria-pressed', String(model.sectionVisible));
+    this.sectionButton.classList.toggle('is-selected', model.sectionVisible);
+
+    const ready = model.generated !== null;
+    this.thickness.disabled = !ready;
+    this.play.disabled = !ready;
+    this.resetButton.disabled = !ready;
+    this.viewButtons.get('shell')!.disabled = !ready;
+    for (const button of this.toolButtons.values()) button.disabled = !ready;
 
     const centimeters = thicknessToCentimeters(model.thickness);
     if (document.activeElement !== this.thickness) this.thickness.value = centimeters.toFixed(1);
     this.publishThicknessReadout(Number(this.thickness.value));
 
-    this.stats.textContent = model.generated ? this.formatStats(model.generated) : 'No simulatable shell yet.';
+    this.stats.textContent = model.generated
+      ? this.formatStats(model.generated)
+      : model.generating
+        ? 'Generating shell…'
+        : 'No shell. Choose a source to generate one.';
     this.play.textContent = model.simulationPaused ? 'Play' : 'Pause';
     this.play.ariaLabel = model.simulationPaused ? 'Play simulation' : 'Pause simulation';
-    if (model.stage === 'run') {
-      this.play.title = model.simulationPaused ? 'Start the simulation' : 'Pause the simulation';
-    }
-    this.status.textContent = model.status || this.fallbackStatus(model);
+    this.play.title = model.simulationPaused ? 'Start the simulation' : 'Pause the simulation';
+    this.status.textContent = model.status || (model.simulationPaused ? 'Simulation paused' : 'Simulation running');
 
     this.legend.replaceChildren();
     for (const entry of model.legend) {
@@ -237,10 +251,8 @@ export class ConversionControls {
     }
     this.legend.hidden = !model.structureVisible;
 
-    const stageHint = model.stage === 'run'
-      ? SIM_TOOLS.find((tool) => tool.id === model.tool)?.hint ?? ''
-      : STAGE_HINTS[model.stage];
-    this.hint.textContent = `${stageHint} · ${CAMERA_HINT}`;
+    const hint = model.sectionVisible ? SECTION_HINT[model.view] : (SIM_TOOLS.find((tool) => tool.id === model.tool)?.hint ?? '');
+    this.hint.textContent = `${hint} · ${CAMERA_HINT}`;
   }
 
   private emitThickness(commit: boolean): void {
@@ -256,49 +268,12 @@ export class ConversionControls {
   }
 
   private formatStats(stats: ConversionGeneratedStats): string {
-    const counts = [
+    return [
       `${stats.vertices.toLocaleString()} vertices`,
       `${stats.triangles.toLocaleString()} triangles`,
       `${stats.stretchEdges.toLocaleString()} stretch edges`,
       `${stats.bendPairs.toLocaleString()} bend pairs`,
     ].join(' · ');
-    return `Generated at ${formatCentimeters(thicknessToCentimeters(stats.thickness))} · ${counts}`;
-  }
-
-  private fallbackStatus(model: ConversionControlModel): string {
-    if (model.stage === 'source') {
-      const source = CONVERSION_SOURCES.find((item) => item.id === model.sourceId);
-      return source ? `Source · ${source.label}` : 'Choose a source mesh';
-    }
-    if (model.stage === 'generate') {
-      return model.generated ? 'Shell ready. Switch to Run to simulate it.' : 'Set a thickness, then generate the shell.';
-    }
-    return model.simulationPaused ? 'Simulation paused' : 'Simulation running';
-  }
-
-  /** Source edits the mesh and structure overlay; Generate sets thickness; Run simulates. */
-  private applyStage(stage: ConversionStage): void {
-    const source = stage === 'source';
-    const generate = stage === 'generate';
-    const run = stage === 'run';
-    this.sourceSelect.disabled = !source;
-    this.structure.disabled = false;
-    this.thickness.disabled = !generate;
-    this.generateShell.disabled = !generate;
-    this.play.disabled = !run;
-    this.resetButton.disabled = !run;
-    for (const button of this.toolButtons.values()) button.disabled = !run;
-
-    this.sourceSelect.title = source ? 'Rigid solid mesh to convert' : 'Switch to Source to change the mesh';
-    this.structure.title = source ? 'Show source mesh vertices' : 'Show generated simulation vertices and constraints';
-    this.thickness.title = generate ? 'Simulated shell thickness' : 'Switch to Generate to set thickness';
-    this.generateShell.title = generate ? 'Build a thin simulatable shell' : 'Switch to Generate to build the shell';
-    this.play.title = run ? this.play.title : 'Switch to Run to simulate';
-    this.resetButton.title = run ? 'Restore the generated shell and pause' : 'Switch to Run to reset the simulation';
-    for (const [id, button] of this.toolButtons) {
-      const hint = SIM_TOOLS.find((tool) => tool.id === id)!.hint;
-      button.title = run ? hint : 'Switch to Run to use simulation tools';
-    }
   }
 
   private syncRadios<T extends string>(buttons: Map<T, HTMLButtonElement>, active: T): void {
