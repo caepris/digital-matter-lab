@@ -78,7 +78,7 @@ const SIM_TOOLS: { id: ToolId; label: string; hint: string }[] = [
   { id: 'press', label: 'Press', hint: 'Hold to lower the press.' },
 ];
 
-const CAMERA_HINT = 'Middle-drag orbit · Right-drag pan · Scroll or trackpad zoom';
+const CAMERA_HINT = 'Two-finger scroll or middle-drag orbit · Right-drag pan · Pinch or wheel zoom';
 
 function element<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text?: string): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag);

@@ -1,17 +1,36 @@
 import * as THREE from 'three';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import type { InteractionTarget, ViewportRect } from '../interaction/InteractionRouter';
+import { InteractionRouter, type InteractionTarget, type ViewportRect } from '../interaction/InteractionRouter';
 import { ConversionVisual } from '../rendering/ConversionVisual';
+import { createAssemblyGizmos, type AssemblyGizmos } from '../rendering/assemblyGizmos';
 import { convertSurface, type ConvertedSurface } from '../simulation/conversion/convertSurface';
 import { ConvertedShellSimulation } from '../simulation/conversion/ConvertedShellSimulation';
 import {
   buildSourceMesh,
+  particleMaterials,
   pinnedParticles,
   type SourceMesh,
   type SourceMeshId,
 } from '../simulation/conversion/sourceMeshes';
 import { clampToPlatform, DROP_TARGET_PLANE_Y, PRESS_REST_BOTTOM } from '../simulation/scene';
 import type { MatterSimulation, SimulationFrame, SimulationStats, ToolId } from '../simulation/types';
+import {
+  MAX_ACCESSORY_SCALE,
+  addRigidWeldPart,
+  emptyRigidWeldDocument,
+  nextRigidWeldId,
+  removeRigidWeldPart,
+  selectedRigidWeld,
+  updateRigidWeldPart,
+  type AccessoryTransformTool,
+  type QuatTuple,
+  type RigidWeldDocument,
+  type Vec3Tuple,
+} from '../conversion-editor/RigidWeldDocument';
+import {
+  placeRigidAccessory,
+  recomputeRigidWelds,
+} from '../simulation/conversion/autoWeldRigid';
+import { RIGID_ACCESSORY_IDS, type RigidAccessoryId } from '../simulation/conversion/rigidAccessories';
 import {
   ConversionControls,
   type ConversionControlModel,
@@ -31,12 +50,14 @@ const emptyFrame: SimulationFrame = {
 
 const TARGET_SPACING: Record<SourceMeshId, number> = {
   tshirt: 0.07,
+  'denim-jacket': 0.05,
   curtain: 0.1,
   'car-shell': 0.1,
 };
 
 const PHYSICS: Record<SourceMeshId, { presetId: string; mass: number; structural: boolean }> = {
   tshirt: { presetId: 'loose-cloth', mass: 0.3, structural: false },
+  'denim-jacket': { presetId: 'structured-fabric', mass: 0.8, structural: false },
   curtain: { presetId: 'loose-cloth', mass: 0.9, structural: false },
   'car-shell': { presetId: 'sheet-metal', mass: 2.4, structural: true },
 };
@@ -53,6 +74,8 @@ export class ConversionWorkspace implements InteractionTarget {
     structureVisible: false,
     sectionVisible: false,
     view: 'shell' as ConversionView,
+    accessoryPresetId: RIGID_ACCESSORY_IDS[0] as RigidAccessoryId,
+    accessoryTool: 'select' as AccessoryTransformTool,
   };
   readonly view: ConversionVisual;
   sourceId: ConversionSourceId = 'tshirt';
@@ -66,8 +89,13 @@ export class ConversionWorkspace implements InteractionTarget {
   private status = '';
   private activeTool: ToolId | null = null;
   private sectionDragging = false;
+  private rigidWeldDocument: RigidWeldDocument = emptyRigidWeldDocument();
+  private accessoryDragging = false;
+  private accessoryEditMode = true;
   private readonly controls: ConversionControls;
-  private readonly orbit: OrbitControls;
+  private readonly gizmos: AssemblyGizmos;
+  /** The viewport sits above the shared canvas, so it routes its own tool input. */
+  private readonly router: InteractionRouter;
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -95,7 +123,20 @@ export class ConversionWorkspace implements InteractionTarget {
       },
       onThickness: (thickness, commit) => this.setThickness(thickness, commit),
       onSimulationPaused: (paused) => {
+        if (!paused && this.rigidWeldDocument.parts.some((part) => !part.valid)) {
+          this.status = 'Move detached rigid meshes back into contact before simulating.';
+          this.simulationPaused = true;
+          this.refresh();
+          return;
+        }
         this.simulationPaused = paused;
+        this.accessoryEditMode = false;
+        this.view.syncRigidWelds(
+          this.rigidWeldDocument.parts,
+          this.source,
+          this.rigidWeldDocument.selectedId,
+          false,
+        );
         this.refresh();
       },
       onReset: () => this.resetSimulation(),
@@ -104,6 +145,16 @@ export class ConversionWorkspace implements InteractionTarget {
         this.state.tool = tool;
         this.refresh();
       },
+      onAccessoryPreset: (id) => {
+        this.state.accessoryPresetId = id;
+        this.setAccessoryTool('place');
+      },
+      onAccessoryTool: (tool) => this.setAccessoryTool(tool),
+      onAccessorySelect: (id) => {
+        this.rigidWeldDocument = { ...this.rigidWeldDocument, selectedId: id };
+        this.refresh();
+      },
+      onAccessoryDelete: () => this.deleteSelectedAccessory(),
     });
 
     this.element = document.createElement('section');
@@ -113,15 +164,26 @@ export class ConversionWorkspace implements InteractionTarget {
     this.viewport.className = 'panel-viewport conversion-viewport';
     this.viewport.append(this.controls.hint, this.controls.legend);
     this.element.append(this.controls.root, this.viewport);
-    this.orbit = new OrbitControls(this.view.camera, this.canvas);
-    this.orbit.enableDamping = false;
-    this.orbit.target.set(0, 0.6, 0);
-    this.orbit.mouseButtons = {
-      LEFT: -1 as unknown as THREE.MOUSE,
-      MIDDLE: THREE.MOUSE.ROTATE,
-      RIGHT: THREE.MOUSE.PAN,
+    this.gizmos = createAssemblyGizmos(
+      this.view.camera,
+      this.viewport,
+      this.canvas,
+      () => this.onAccessoryGizmoChange(),
+      (dragging) => this.onAccessoryGizmoDrag(dragging),
+    );
+    this.view.panel.scene.add(this.gizmos.transform.getHelper());
+    this.gizmos.setInteraction(true, false);
+    const localTarget: InteractionTarget = {
+      camera: this.view.camera,
+      viewportRect: () => ({ left: 0, top: 0, width: this.viewport.clientWidth, height: this.viewport.clientHeight }),
+      pointerDown: (ray) => this.pointerDown(ray),
+      pointerMove: (ray) => this.pointerMove(ray),
+      pointerUp: () => this.pointerUp(),
     };
-    this.orbit.enabled = false;
+    this.router = new InteractionRouter(this.viewport, [localTarget]);
+    this.viewport.addEventListener('pointermove', this.updateCursor);
+    this.viewport.addEventListener('pointerdown', this.updateCursor);
+    this.viewport.addEventListener('pointerup', this.updateCursor);
     this.frameSource();
     this.scheduleGenerate();
   }
@@ -138,10 +200,10 @@ export class ConversionWorkspace implements InteractionTarget {
     const center = box.getCenter(new THREE.Vector3());
     const size = box.getSize(new THREE.Vector3());
     const extent = Math.max(size.x, size.y, size.z);
-    this.orbit.target.copy(center);
+    this.gizmos.orbit.target.copy(center);
     this.view.camera.position.copy(center).addScaledVector(CAMERA_DIRECTION, 2.4 + extent * 1.35);
     this.view.camera.lookAt(center);
-    this.orbit.update();
+    this.gizmos.orbit.update();
   }
 
   get camera(): THREE.Camera {
@@ -156,12 +218,28 @@ export class ConversionWorkspace implements InteractionTarget {
     return this.converted ? this.converted.positions.length / 3 : 0;
   }
 
+  get generatedRegionColorCount(): number {
+    return this.view.generatedRegionColorCount;
+  }
+
   get sectionVisible(): boolean {
     return this.state.sectionVisible;
   }
 
   get sectionPosition(): number {
     return this.view.sectionPosition;
+  }
+
+  get rigidWeldCount(): number {
+    return this.rigidWeldDocument.parts.reduce((count, part) => count + part.welds.length, 0);
+  }
+
+  get rigidAccessoryCount(): number {
+    return this.rigidWeldDocument.parts.length;
+  }
+
+  get maxRigidWeldSeparation(): number {
+    return this.shell?.maxWeldSeparation() ?? 0;
   }
 
   viewportRect(): ViewportRect {
@@ -176,9 +254,18 @@ export class ConversionWorkspace implements InteractionTarget {
   }
 
   setActive(active: boolean): void {
-    if (!active) this.pointerUp();
-    this.orbit.enabled = active;
+    if (!active) {
+      this.router.cancelActive();
+      this.pointerUp();
+    }
+    this.gizmos.setInteraction(true, active);
   }
+
+  private updateCursor = (event: PointerEvent): void => {
+    const tool = this.state.tool;
+    const cursor = tool === 'grab' ? (event.buttons & 1 ? 'grabbing' : 'grab') : tool === 'drop' ? 'crosshair' : 'ns-resize';
+    this.viewport.style.cursor = this.state.accessoryTool === 'place' ? 'copy' : cursor;
+  };
 
   step(dt: number): void {
     if (!this.simulationPaused) this.shell?.step(dt);
@@ -191,6 +278,39 @@ export class ConversionWorkspace implements InteractionTarget {
   }
 
   pointerDown(ray: THREE.Ray): boolean {
+    if (this.gizmoBusy()) return false;
+    if (this.state.accessoryTool === 'place') {
+      const part = placeRigidAccessory(
+        ray,
+        this.source,
+        this.state.accessoryPresetId,
+        nextRigidWeldId(this.rigidWeldDocument.parts),
+      );
+      if (!part) {
+        this.status = 'Click directly on the source mesh to place the rigid mesh.';
+        this.refresh();
+        return false;
+      }
+      this.rigidWeldDocument = addRigidWeldPart(this.rigidWeldDocument, part);
+      this.simulationPaused = true;
+      this.state.view = 'source';
+      this.state.accessoryTool = 'move';
+      this.rebuildAfterAccessoryEdit();
+      this.status = part.valid
+        ? `Placed ${part.label} with ${part.welds.length} automatic weld point${part.welds.length === 1 ? '' : 's'}.`
+        : `Placed ${part.label}, but no contact point could be welded.`;
+      this.refresh();
+      return false;
+    }
+    if (this.state.accessoryTool !== 'select') {
+      const id = this.view.rigidWeldAt(ray);
+      if (id) {
+        this.rigidWeldDocument = { ...this.rigidWeldDocument, selectedId: id };
+        this.simulationPaused = true;
+        this.refresh();
+        return false;
+      }
+    }
     if (this.state.sectionVisible && this.view.beginSectionDrag(ray)) {
       this.sectionDragging = true;
       this.viewport.classList.add('is-interacting');
@@ -230,8 +350,12 @@ export class ConversionWorkspace implements InteractionTarget {
   dispose(): void {
     if (this.generateTimer !== null) clearTimeout(this.generateTimer);
     this.pointerUp();
+    this.router.dispose();
+    this.viewport.removeEventListener('pointermove', this.updateCursor);
+    this.viewport.removeEventListener('pointerdown', this.updateCursor);
+    this.viewport.removeEventListener('pointerup', this.updateCursor);
     this.shell?.dispose();
-    this.orbit.dispose();
+    this.gizmos.dispose();
     this.view.dispose();
   }
 
@@ -242,6 +366,12 @@ export class ConversionWorkspace implements InteractionTarget {
     this.converted = null;
     this.sourceId = id;
     this.source = buildSourceMesh(id);
+    this.accessoryEditMode = true;
+    if (this.rigidWeldDocument.parts.length > 0) {
+      this.rigidWeldDocument = emptyRigidWeldDocument();
+      this.status = 'Changed source and cleared rigid welds because their surface anchors no longer apply.';
+    }
+    if (this.state.view === 'material' && this.source.materials.length === 0) this.state.view = 'source';
     this.thickness = this.source.defaultThickness;
     this.simulationPaused = true;
     this.view.configure(this.source, null, this.thickness);
@@ -302,19 +432,45 @@ export class ConversionWorkspace implements InteractionTarget {
     this.view.setView(this.state.view);
     this.view.setStructureVisible(this.state.structureVisible);
     this.view.setSectionVisible(this.state.sectionVisible);
+    this.view.syncRigidWelds(
+      this.rigidWeldDocument.parts,
+      this.source,
+      this.rigidWeldDocument.selectedId,
+      this.accessoryEditMode,
+    );
   }
 
   private createSimulation(): void {
     if (!this.converted) return;
     this.shell?.dispose();
     const physics = PHYSICS[this.sourceId];
+    const regionIds =
+      this.source.materials.length > 0
+        ? particleMaterials(
+            this.source,
+            this.converted.positions.length / 3,
+            this.converted.triangles,
+            this.converted.sourceBindings,
+          )
+        : undefined;
     this.shell = new ConvertedShellSimulation({
       mesh: this.converted,
       thickness: this.thickness,
       presetId: physics.presetId,
       totalMass: physics.mass,
       structural: physics.structural,
-      pinned: pinnedParticles(this.source, this.converted.positions),
+      pinned: pinnedParticles(this.source, this.converted.positions, regionIds),
+      regions:
+        regionIds
+          ? {
+              materials: this.source.materials,
+              particleMaterials: regionIds,
+            }
+          : undefined,
+      rigidWelds: {
+        source: this.source,
+        parts: this.rigidWeldDocument.parts,
+      },
     });
     this.simulationPaused = true;
   }
@@ -341,30 +497,147 @@ export class ConversionWorkspace implements InteractionTarget {
           bendPairs: this.converted.bendPairs.length / 2,
         }
       : null;
-    const showingSource = !this.converted || this.state.view === 'source';
+    const showingSource = !this.converted || this.state.view !== 'shell';
+    const structureLegend = !this.state.structureVisible
+      ? []
+      : showingSource
+        ? [
+            { label: 'Rigid solid surface vertices', color: 0xf4f6fa },
+            { label: 'Closed solid edges', color: 0x9ba8b8 },
+          ]
+        : [
+            { label: 'Simulation particles', color: 0xf4f6fa },
+            { label: 'Stretch and bend structure', color: 0x60e0c1 },
+          ];
+    const materialLegend =
+      this.state.view === 'material'
+        ? this.source.materials.map((material) => ({ label: material.label, color: material.color }))
+        : [];
     const model: ConversionControlModel = {
       sourceId: this.sourceId,
       view: this.state.view,
       structureVisible: this.state.structureVisible,
       sectionVisible: this.state.sectionVisible,
+      materialMapped: this.source.materials.length > 0,
       thickness: this.thickness,
       generated,
       generating: this.generating,
       status: this.status,
       simulationPaused: this.simulationPaused,
       tool: this.state.tool,
-      legend:
-        showingSource
-          ? [
-              { label: 'Rigid solid surface vertices', color: 0xf4f6fa },
-              { label: 'Closed solid edges', color: 0x9ba8b8 },
-            ]
-          : [
-              { label: 'Simulation particles', color: 0xf4f6fa },
-              { label: 'Stretch and bend structure', color: 0x60e0c1 },
-            ],
+      accessoryPresetId: this.state.accessoryPresetId,
+      accessoryTool: this.state.accessoryTool,
+      accessoryParts: this.rigidWeldDocument.parts.map((part) => ({
+        id: part.id,
+        label: part.label,
+        valid: part.valid,
+        weldCount: part.welds.length,
+      })),
+      selectedAccessoryId: this.rigidWeldDocument.selectedId,
+      accessoriesValid: this.rigidWeldDocument.parts.every((part) => part.valid),
+      legend: [...materialLegend, ...structureLegend],
     };
     this.controls.sync(model);
+    if (!this.accessoryDragging) {
+      this.view.syncRigidWelds(
+        this.rigidWeldDocument.parts,
+        this.source,
+        this.rigidWeldDocument.selectedId,
+        this.accessoryEditMode,
+      );
+    }
+    const transformTool =
+      this.state.accessoryTool === 'move' ||
+      this.state.accessoryTool === 'rotate' ||
+      this.state.accessoryTool === 'scale';
+    const selected = selectedRigidWeld(this.rigidWeldDocument);
+    const proxy = selected ? this.view.rigidWeldProxy(selected.id) : undefined;
+    if (transformTool && proxy && this.accessoryEditMode) {
+      this.gizmos.transform.setMode(
+        this.state.accessoryTool === 'move'
+          ? 'translate'
+          : this.state.accessoryTool === 'rotate'
+            ? 'rotate'
+            : 'scale',
+      );
+      if (this.gizmos.transform.object !== proxy) this.gizmos.transform.attach(proxy);
+    } else if (!this.accessoryDragging) {
+      this.gizmos.transform.detach();
+    }
+  }
+
+  private setAccessoryTool(tool: AccessoryTransformTool): void {
+    this.pointerUp();
+    this.simulationPaused = true;
+    this.accessoryEditMode = true;
+    this.state.accessoryTool = tool;
+    this.state.view = 'source';
+    this.view.setView('source');
+    this.status =
+      tool === 'place'
+        ? 'Click the source mesh to place and auto-weld the selected rigid mesh.'
+        : tool === 'select'
+          ? 'Select a placed rigid mesh.'
+          : `${tool[0].toUpperCase()}${tool.slice(1)} the selected rigid mesh; welds update when you release.`;
+    this.refresh();
+  }
+
+  private deleteSelectedAccessory(): void {
+    const selected = selectedRigidWeld(this.rigidWeldDocument);
+    if (!selected) return;
+    this.rigidWeldDocument = removeRigidWeldPart(this.rigidWeldDocument, selected.id);
+    this.rebuildAfterAccessoryEdit();
+    this.status = `Deleted ${selected.label} and its welds.`;
+    this.refresh();
+  }
+
+  private rebuildAfterAccessoryEdit(): void {
+    this.simulationPaused = true;
+    this.accessoryEditMode = true;
+    if (this.converted) this.createSimulation();
+    this.syncView();
+    this.refresh();
+  }
+
+  private onAccessoryGizmoChange(): void {
+    const mesh = this.gizmos.transform.object;
+    const selected = selectedRigidWeld(this.rigidWeldDocument);
+    if (!mesh || !selected) return;
+    const scale = Math.min(MAX_ACCESSORY_SCALE, Math.max(0.5, Math.max(mesh.scale.x, mesh.scale.y, mesh.scale.z)));
+    mesh.scale.setScalar(scale);
+    const position: Vec3Tuple = [mesh.position.x, mesh.position.y, mesh.position.z];
+    const quaternion: QuatTuple = [mesh.quaternion.x, mesh.quaternion.y, mesh.quaternion.z, mesh.quaternion.w];
+    this.rigidWeldDocument = updateRigidWeldPart(this.rigidWeldDocument, selected.id, (part) => ({
+      ...part,
+      position,
+      quaternion,
+      uniformScale: scale,
+    }));
+  }
+
+  private onAccessoryGizmoDrag(dragging: boolean): void {
+    this.accessoryDragging = dragging;
+    if (dragging) {
+      this.simulationPaused = true;
+      return;
+    }
+    const selected = selectedRigidWeld(this.rigidWeldDocument);
+    if (selected) {
+      this.rigidWeldDocument = updateRigidWeldPart(this.rigidWeldDocument, selected.id, (part) =>
+        recomputeRigidWelds(part, this.source),
+      );
+    }
+    this.rebuildAfterAccessoryEdit();
+    const updated = selectedRigidWeld(this.rigidWeldDocument);
+    this.status = updated?.valid
+      ? `Updated ${updated.label}: ${updated.welds.length} automatic weld point${updated.welds.length === 1 ? '' : 's'}.`
+      : 'Detached: move the rigid mesh back into contact before simulating.';
+    this.refresh();
+  }
+
+  private gizmoBusy(): boolean {
+    const transform = this.gizmos.transform as unknown as { axis: string | null; dragging: boolean };
+    return Boolean(transform.axis) || transform.dragging || this.accessoryDragging;
   }
 
   private readonly sourceStats: MatterSimulation = {

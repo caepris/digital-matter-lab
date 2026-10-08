@@ -100,6 +100,36 @@ function signedVolume(mesh: SourceMesh): number {
   return volume;
 }
 
+function surfaceEuler(mesh: SourceMesh): number {
+  return vertexCount(mesh) - directedEdges(mesh).size / 2 + mesh.triangles.length / 3;
+}
+
+function surfaceComponentCount(mesh: SourceMesh): number {
+  const adjacent: number[][] = Array.from({ length: vertexCount(mesh) }, () => []);
+  for (let i = 0; i < mesh.triangles.length; i += 3) {
+    const [a, b, c] = [mesh.triangles[i], mesh.triangles[i + 1], mesh.triangles[i + 2]];
+    adjacent[a].push(b, c);
+    adjacent[b].push(a, c);
+    adjacent[c].push(a, b);
+  }
+  const seen = new Uint8Array(adjacent.length);
+  let components = 0;
+  for (let start = 0; start < adjacent.length; start++) {
+    if (seen[start]) continue;
+    components++;
+    const stack = [start];
+    seen[start] = 1;
+    while (stack.length) {
+      for (const next of adjacent[stack.pop()!]) {
+        if (seen[next]) continue;
+        seen[next] = 1;
+        stack.push(next);
+      }
+    }
+  }
+  return components;
+}
+
 function expectSurface(mesh: SourceMesh): void {
   expect(mesh.positions.length).toBeGreaterThan(0);
   expect(mesh.positions.length % 3).toBe(0);
@@ -138,7 +168,7 @@ function expectSurface(mesh: SourceMesh): void {
 }
 
 describe('source mesh catalog', () => {
-  it('lists tshirt, curtain, and car-shell with display metadata', () => {
+  it('lists every source mesh with display metadata', () => {
     expect(listSourceMeshes().map((entry) => entry.id)).toEqual([...SOURCE_MESH_IDS]);
     const colors = new Set<number>();
     for (const id of SOURCE_MESH_IDS) {
@@ -217,5 +247,97 @@ describe('procedural source meshes', () => {
     const archBottom = Math.min(...ys(mesh, (x) => Math.abs(Math.abs(x) - 0.7) < 0.03));
     expect(archBottom).toBeGreaterThan(box.min[1] + 0.15);
     expect(mesh.pinRegion).toBeNull();
+  });
+
+  it('builds one jacket mesh whose hood and front are cotton and whose body is denim', () => {
+    const mesh = buildSourceMesh('denim-jacket');
+    expectSurface(mesh);
+    expect(mesh.materials.map((material) => material.id)).toEqual(['denim', 'cotton']);
+    expect(mesh.materialIds.length).toBe(vertexCount(mesh));
+    const box = bounds(mesh);
+    const height = box.max[1] - box.min[1];
+    expect(height).toBeGreaterThan(1.05);
+    const hemWidth = 2 * Math.max(...xs(mesh, (y) => y < box.min[1] + 0.06));
+    expect(box.max[0] - box.min[0]).toBeGreaterThan(hemWidth * 1.7);
+    const cuffY = average(mesh, (x, _y, _z) => Math.abs(x) > 0.55, 1);
+    expect(cuffY).toBeGreaterThan(box.min[1] + height * 0.45);
+    expect(cuffY).toBeLessThan(box.min[1] + height * 0.75);
+    const hoodY = Math.max(...ys(mesh, (x) => Math.abs(x) < 0.05));
+    const shoulderY = Math.max(...ys(mesh, (x) => Math.abs(x) > 0.36 && Math.abs(x) < 0.5));
+    expect(hoodY).toBeGreaterThan(shoulderY + 0.2);
+
+    let cotton = 0;
+    let hoodCotton = 0;
+    let hoodCount = 0;
+    let bodyDenim = 0;
+    let bodyCount = 0;
+    for (let i = 0; i < mesh.materialIds.length; i++) {
+      const x = mesh.positions[i * 3];
+      const y = mesh.positions[i * 3 + 1];
+      const z = mesh.positions[i * 3 + 2];
+      if (mesh.materialIds[i] === 1) cotton++;
+      if (y > box.max[1] - 0.16 && Math.abs(x) < 0.16) {
+        hoodCount++;
+        if (mesh.materialIds[i] === 1) hoodCotton++;
+      }
+      if (y > box.min[1] + height * 0.35 && y < box.min[1] + height * 0.6 && Math.abs(x) > 0.16 && Math.abs(x) < 0.32 && z < 0) {
+        bodyCount++;
+        if (mesh.materialIds[i] === 0) bodyDenim++;
+      }
+    }
+    expect(cotton / mesh.materialIds.length).toBeGreaterThan(0.08);
+    expect(cotton / mesh.materialIds.length).toBeLessThan(0.45);
+    expect(hoodCount).toBeGreaterThan(10);
+    expect(hoodCotton / hoodCount).toBeGreaterThan(0.8);
+    expect(bodyCount).toBeGreaterThan(10);
+    expect(bodyDenim / bodyCount).toBeGreaterThan(0.8);
+    expect(mesh.pinRegion?.maxY).toBeLessThan(box.max[1] - 0.12);
+    expect(surfaceComponentCount(mesh)).toBe(1);
+    // A negative Euler characteristic proves that the closed manifold has
+    // genuine through-openings, rather than painted or recessed fake holes.
+    expect(surfaceEuler(mesh)).toBeLessThanOrEqual(-4);
+
+    const openFrontX: number[] = [];
+    for (let i = 0; i < mesh.positions.length; i += 3) {
+      const x = mesh.positions[i];
+      const y = mesh.positions[i + 1];
+      const z = mesh.positions[i + 2];
+      if (y > box.min[1] + height * 0.2 && y < box.min[1] + height * 0.7 && z > box.max[2] - 0.04) {
+        openFrontX.push(Math.abs(x));
+      }
+    }
+    expect(Math.min(...openFrontX)).toBeGreaterThan(0.03);
+
+    const plainFront = Math.max(
+      ...Array.from({ length: vertexCount(mesh) }, (_, i) => i)
+        .filter((i) => {
+          const x = Math.abs(mesh.positions[i * 3]);
+          const y = mesh.positions[i * 3 + 1];
+          return x > 0.255 && x < 0.3 && y > box.min[1] + 0.45 && y < box.min[1] + 0.67;
+        })
+        .map((i) => mesh.positions[i * 3 + 2]),
+    );
+    const pocketFront = Math.max(
+      ...Array.from({ length: vertexCount(mesh) }, (_, i) => i)
+        .filter((i) => {
+          const x = Math.abs(mesh.positions[i * 3]);
+          const y = mesh.positions[i * 3 + 1];
+          return Math.abs(x - 0.165) < 0.075 && y > box.min[1] + 0.45 && y < box.min[1] + 0.67;
+        })
+        .map((i) => mesh.positions[i * 3 + 2]),
+    );
+    expect(pocketFront).toBeGreaterThan(plainFront + 0.02);
+  });
+
+  it('uses a jacket-specific hanger with broad shoulders and a hook through the neck', () => {
+    const jacket = buildSourceMesh('denim-jacket');
+    const tshirt = buildSourceMesh('tshirt');
+    const shoulderWidth = (mesh: SourceMesh) => mesh.supports[1].from[0] - mesh.supports[0].from[0];
+    expect(shoulderWidth(jacket)).toBeGreaterThan(shoulderWidth(tshirt));
+    expect(jacket.supports[3].to[2]).toBeGreaterThan(0.04);
+    expect(jacket.supports[3].to[1]).toBeGreaterThan(jacket.supports[0].to[1]);
+    expect(jacket.pinRegion?.materialId).toBe(0);
+    expect(jacket.pinRegion?.supportIndices).toEqual([0, 1]);
+    expect(jacket.pinRegion?.maxSupportDistance).toBeLessThan(0.1);
   });
 });

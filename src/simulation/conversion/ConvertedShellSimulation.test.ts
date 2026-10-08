@@ -1,8 +1,10 @@
 import * as THREE from 'three';
 import { describe, expect, it } from 'vitest';
 import { convertSurface } from './convertSurface';
-import { buildSourceMesh, pinnedParticles, SOURCE_MESH_IDS } from './sourceMeshes';
+import { buildSourceMesh, particleMaterials, pinnedParticles, SOURCE_MESH_IDS } from './sourceMeshes';
 import { bendingComplianceForThickness, ConvertedShellSimulation } from './ConvertedShellSimulation';
+import { placeRigidAccessory } from './autoWeldRigid';
+import { rigidAccessory } from './rigidAccessories';
 
 const surface = {
   positions: new Float32Array([-0.5, 1, -0.5, 0.5, 1, -0.5, -0.5, 1, 0.5, 0.5, 1, 0.5]),
@@ -58,7 +60,7 @@ describe('ConvertedShellSimulation', () => {
       expect(Array.from(simulation.frame(1).particles ?? []).every(Number.isFinite), id).toBe(true);
       expect(simulation.stats().center.every(Number.isFinite), id).toBe(true);
     }
-  });
+  }, 30_000);
 
   it('hangs a garment from its pinned particles while the rest drapes', () => {
     const source = buildSourceMesh('tshirt');
@@ -133,6 +135,71 @@ describe('ConvertedShellSimulation', () => {
     expect(metal).toBeLessThan(cloth * 0.25);
   });
 
+  it('lets the cotton hoodie flex more than the denim on the same jacket mesh', () => {
+    const source = buildSourceMesh('denim-jacket');
+    const converted = convertSurface({
+      positions: source.positions,
+      triangles: source.triangles,
+      targetSpacing: 0.075,
+    });
+    const ids = particleMaterials(source, converted.positions.length / 3, converted.triangles, converted.sourceBindings);
+    expect(ids.includes(0)).toBe(true);
+    expect(ids.includes(1)).toBe(true);
+    const simulation = new ConvertedShellSimulation({
+      mesh: converted,
+      thickness: source.defaultThickness,
+      presetId: 'structured-fabric',
+      totalMass: 0.8,
+      pinned: pinnedParticles(source, converted.positions, ids),
+      regions: { materials: source.materials, particleMaterials: ids },
+    });
+    expect(simulation.pinned.length).toBeGreaterThan(8);
+    expect(simulation.pinned.every((index) => ids[index] === 0)).toBe(true);
+    expect(simulation.pinned.every((index) => Math.abs(converted.positions[index * 3 + 2]) < 0.07)).toBe(true);
+
+    const seamCompression = simulation.stretch.compressionCompliance;
+    expect(seamCompression).not.toBeNull();
+    let seamCount = 0;
+    for (let edge = 0; edge < simulation.stretch.count; edge++) {
+      const a = simulation.stretch.a[edge];
+      const b = simulation.stretch.b[edge];
+      if (ids[a] === ids[b]) continue;
+      seamCount++;
+      expect(seamCompression![edge]).toBeLessThanOrEqual(source.materials[0].compressionCompliance);
+    }
+    expect(seamCount).toBeGreaterThan(4);
+    const bendStrain = (material: number) => {
+      let sum = 0;
+      let count = 0;
+      const { a, b, rest } = simulation.bend;
+      const positions = simulation.positions;
+      for (let c = 0; c < simulation.bend.count; c++) {
+        if (ids[a[c]] !== material || ids[b[c]] !== material) continue;
+        const i = a[c] * 3;
+        const j = b[c] * 3;
+        const current = Math.hypot(positions[i] - positions[j], positions[i + 1] - positions[j + 1], positions[i + 2] - positions[j + 2]);
+        sum += Math.abs(current - rest[c]) / Math.max(rest[c], 1e-6);
+        count++;
+      }
+      return { mean: sum / count, count };
+    };
+    for (let step = 0; step < 150; step++) simulation.step(1 / 60);
+    const cotton = bendStrain(1);
+    const denim = bendStrain(0);
+    expect(cotton.count).toBeGreaterThan(8);
+    expect(denim.count).toBeGreaterThan(8);
+    expect(cotton.mean).toBeGreaterThan(denim.mean * 2);
+
+    let maxSpeed = 0;
+    const velocities = simulation.velocities;
+    for (let i = 0; i < velocities.length; i += 3) {
+      maxSpeed = Math.max(maxSpeed, Math.hypot(velocities[i], velocities[i + 1], velocities[i + 2]));
+    }
+    expect(maxSpeed).toBeLessThan(2);
+    const center = simulation.stats().center;
+    expect(Math.hypot(center[0], center[2])).toBeLessThan(1.2);
+  }, 30_000);
+
   describe('grabbing the car body', () => {
     const camera = new THREE.Vector3(3, 2.2, 3.5);
     const createCar = () => {
@@ -188,4 +255,36 @@ describe('ConvertedShellSimulation', () => {
       expect(Math.hypot(center[0], center[2])).toBeLessThan(2);
     }, 30_000);
   });
+
+  it('keeps an auto-welded rigid plate rigid and attached to the converted shell', () => {
+    const source = buildSourceMesh('car-shell');
+    const converted = convertSurface({
+      positions: source.positions,
+      triangles: source.triangles,
+      targetSpacing: 0.1,
+    });
+    const part = placeRigidAccessory(
+      new THREE.Ray(new THREE.Vector3(0, 0.5, 3), new THREE.Vector3(0, 0, -1)),
+      source,
+      'plate',
+      'rigid-weld-1',
+    );
+    expect(part?.valid).toBe(true);
+    const simulation = new ConvertedShellSimulation({
+      mesh: converted,
+      thickness: source.defaultThickness,
+      presetId: 'sheet-metal',
+      totalMass: 2.4,
+      structural: true,
+      rigidWelds: { source, parts: [part!] },
+    });
+    expect(simulation.count).toBe(converted.positions.length / 3 + rigidAccessory('plate').positions.length / 3);
+    expect(simulation.weldCount).toBe(part!.welds.length);
+    for (let frame = 0; frame < 120; frame++) simulation.step(1 / 60);
+    expect(simulation.maxWeldSeparation()).toBeLessThan(0.015);
+    expect(simulation.maxRigidShapeError()).toBeLessThan(0.01);
+    expect(simulation.positions.every(Number.isFinite)).toBe(true);
+    simulation.reset();
+    expect(simulation.maxWeldSeparation()).toBeLessThan(0.005);
+  }, 30_000);
 });

@@ -34,14 +34,20 @@ export interface LabTestHook {
     screenPoint(x: number, y: number, z: number): { x: number; y: number };
   };
   conversion: {
-    view(): 'source' | 'shell';
+    view(): 'source' | 'shell' | 'material';
     sourceId(): string;
     thickness(): number;
     /** Distance between the rendered outer and inner shell surfaces. */
     renderedThickness(): number;
     simulationVertexCount(): number;
+    generatedRegionColorCount(): number;
+    setCameraPosition(x: number, y: number, z: number): void;
+    cameraPosition(): number[];
     sectionVisible(): boolean;
     sectionPosition(): number;
+    rigidAccessoryCount(): number;
+    rigidWeldCount(): number;
+    maxRigidWeldSeparation(): number;
   };
 }
 
@@ -302,8 +308,18 @@ export class DigitalMatterLab {
         thickness: () => this.conversionPanels[0].thickness,
         renderedThickness: () => this.conversionPanels[0].view.renderedHalfThickness * 2,
         simulationVertexCount: () => this.conversionPanels[0].simulationVertexCount,
+        generatedRegionColorCount: () => this.conversionPanels[0].generatedRegionColorCount,
+        setCameraPosition: (x, y, z) => {
+          const camera = this.conversionPanels[0].view.camera;
+          camera.position.set(x, y, z);
+          camera.lookAt(0, 0.65, 0);
+        },
+        cameraPosition: () => this.conversionPanels[0].view.camera.position.toArray(),
         sectionVisible: () => this.conversionPanels[0].sectionVisible,
         sectionPosition: () => this.conversionPanels[0].sectionPosition,
+        rigidAccessoryCount: () => this.conversionPanels[0].rigidAccessoryCount,
+        rigidWeldCount: () => this.conversionPanels[0].rigidWeldCount,
+        maxRigidWeldSeparation: () => this.conversionPanels[0].maxRigidWeldSeparation,
       },
     };
   }

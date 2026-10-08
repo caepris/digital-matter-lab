@@ -349,15 +349,19 @@ describe('convertSurface', () => {
     expect(boundaryLoopCount(surface.triangles)).toBe(1);
   });
 
-  it.each(SOURCE_MESH_IDS)('converts %s deterministically into a closed shell that wraps the solid', (id: SourceMeshId) => {
-    const mesh = buildSourceMesh(id);
-    const copy = mesh.positions.slice();
-    const surface = surfaceOf(mesh);
-    expect(Array.from(mesh.positions)).toEqual(Array.from(copy));
-    expect(snapshot(surface)).toEqual(snapshot(surfaceOf(mesh)));
-    expect(surface.positions.length).toBeLessThan(mesh.positions.length);
-    expectConverted(mesh, surface, SPACING);
-    expect(surface.boundaryPairs.length).toBe(0);
-    expect(boundaryLoopCount(surface.triangles)).toBe(0);
-  });
+  it.each(SOURCE_MESH_IDS)(
+    'converts %s deterministically into a closed shell that wraps the solid',
+    (id: SourceMeshId) => {
+      const mesh = buildSourceMesh(id);
+      const copy = mesh.positions.slice();
+      const surface = surfaceOf(mesh);
+      expect(Array.from(mesh.positions)).toEqual(Array.from(copy));
+      expect(snapshot(surface)).toEqual(snapshot(surfaceOf(mesh)));
+      expect(surface.positions.length).toBeLessThan(mesh.positions.length);
+      expectConverted(mesh, surface, SPACING);
+      expect(surface.boundaryPairs.length).toBe(0);
+      expect(boundaryLoopCount(surface.triangles)).toBe(0);
+    },
+    30_000,
+  );
 });

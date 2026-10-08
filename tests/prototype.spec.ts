@@ -185,6 +185,7 @@ test('thin conversion auto-generates, edits thickness live, and simulates every 
   await expect(shellStats).toContainText('vertices');
   expect(await vertexCount()).toBeGreaterThan(3);
   expect(await page.evaluate(() => window.__digitalMatterLab!.conversion.view())).toBe('shell');
+  await expect(workspace.locator('[data-view=material]')).toBeDisabled();
   const firstSection = workspace.locator('.editor-section').first();
   await expect(firstSection.locator('[data-view=shell]')).toBeVisible();
   await expect(firstSection.getByTestId('section-tool')).toBeVisible();
@@ -196,18 +197,29 @@ test('thin conversion auto-generates, edits thickness live, and simulates every 
   const source = workspace.getByTestId('source-select');
   const play = workspace.getByTestId('simulation-play');
   const thickness = workspace.getByTestId('thickness');
-  for (const id of ['curtain', 'car-shell', 'tshirt']) {
+  for (const id of ['curtain', 'car-shell', 'tshirt', 'denim-jacket']) {
     await source.selectOption(id);
     await expect.poll(() => page.evaluate(() => window.__digitalMatterLab!.conversion.sourceId())).toBe(id);
     await expect(shellStats).toContainText('vertices');
     expect(await vertexCount()).toBeGreaterThan(3);
     await expect(play).toBeEnabled();
   }
+  expect(await vertexCount()).toBeGreaterThan(1_800);
+  expect(await page.evaluate(() => window.__digitalMatterLab!.conversion.generatedRegionColorCount())).toBe(2);
+
+  await workspace.locator('[data-view=material]').click();
+  expect(await page.evaluate(() => window.__digitalMatterLab!.conversion.view())).toBe('material');
+  const legend = workspace.locator('.structure-legend');
+  await expect(legend).toBeVisible();
+  await expect(legend).toContainText('Denim');
+  await expect(legend).toContainText('Cotton hoodie');
+  await workspace.locator('[data-view=shell]').click();
 
   await play.click();
   await expect(play).toHaveText('Pause');
   const index = 4;
   await expect.poll(async () => (await stats(page, index)).maxDeformation).toBeGreaterThan(0.001);
+  expect(await page.evaluate(() => window.__digitalMatterLab!.conversion.generatedRegionColorCount())).toBe(2);
   const vertices = await vertexCount();
 
   await thickness.fill('6');
@@ -245,6 +257,8 @@ test('thin conversion auto-generates, edits thickness live, and simulates every 
   await expect.poll(async () => (await stats(page, index)).impactorCount).toBe(1);
   await workspace.getByTestId('reset').click();
   expect((await stats(page, index)).impactorCount).toBe(0);
+  expect(await page.evaluate(() => window.__digitalMatterLab!.conversion.sourceId())).toBe('denim-jacket');
+  expect(await page.evaluate(() => window.__digitalMatterLab!.conversion.generatedRegionColorCount())).toBe(2);
   await expect(play).toHaveText('Pause');
   await play.click();
   await expect(play).toHaveText('Play');
@@ -255,6 +269,78 @@ test('thin conversion auto-generates, edits thickness live, and simulates every 
   await expect(workspace.getByRole('heading', { name: 'Thin mesh conversion' })).toBeVisible();
   const hasHorizontalOverflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
   expect(hasHorizontalOverflow).toBe(false);
+});
+
+test('thin conversion viewport orbits with a trackpad or middle-drag, zooms, and still takes tool clicks', async ({ page }) => {
+  await page.getByRole('tab', { name: 'Thin conversion' }).click();
+  const workspace = page.locator('[data-kind=conversion]');
+  await expect(workspace.getByTestId('conversion-stats')).toContainText('vertices');
+  const viewport = workspace.locator('.conversion-viewport');
+  const box = await viewport.boundingBox();
+  if (!box) throw new Error('Missing conversion viewport');
+  const center = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+  const camera = () => page.evaluate(() => window.__digitalMatterLab!.conversion.cameraPosition());
+  const distanceToTarget = (p: number[]) => Math.hypot(...p);
+
+  // Two-finger trackpad scroll orbits: the camera swings around without changing its distance much.
+  await page.mouse.move(center.x, center.y);
+  const beforeOrbit = await camera();
+  for (let i = 0; i < 6; i++) await page.mouse.wheel(14, 0);
+  await expect.poll(async () => Math.abs((await camera())[0] - beforeOrbit[0])).toBeGreaterThan(0.2);
+  const afterOrbit = await camera();
+  expect(Math.hypot(...afterOrbit)).toBeCloseTo(Math.hypot(...beforeOrbit), 0);
+
+  // A notched mouse wheel still zooms toward the jacket.
+  await page.mouse.wheel(0, -200);
+  await expect.poll(async () => distanceToTarget(await camera())).toBeLessThan(distanceToTarget(afterOrbit) - 0.05);
+
+  // Middle-drag orbits too.
+  const beforeDrag = await camera();
+  await page.mouse.move(center.x, center.y);
+  await page.mouse.down({ button: 'middle' });
+  await page.mouse.move(center.x + 120, center.y, { steps: 6 });
+  await page.mouse.up({ button: 'middle' });
+  await expect.poll(async () => Math.abs((await camera())[0] - beforeDrag[0])).toBeGreaterThan(0.1);
+
+  // Left-click tools still reach the simulation through the viewport.
+  const play = workspace.getByTestId('simulation-play');
+  await play.click();
+  await workspace.locator('[data-tool=drop]').click();
+  const target = await bodyPoint(page, 4);
+  await page.mouse.click(target.x, target.y - 30);
+  await expect.poll(async () => (await stats(page, 4)).impactorCount).toBe(1);
+});
+
+test('thin conversion places and simulates an auto-welded rigid accessory', async ({ page }) => {
+  await page.getByRole('tab', { name: 'Thin conversion' }).click();
+  const workspace = page.locator('[data-kind=conversion]');
+  await workspace.getByTestId('source-select').selectOption('car-shell');
+  await expect.poll(() => page.evaluate(() => window.__digitalMatterLab!.conversion.sourceId())).toBe('car-shell');
+  await expect(workspace.getByTestId('conversion-stats')).toContainText('vertices');
+
+  await workspace.getByTestId('rigid-weld-preset').selectOption('plate');
+  await workspace.locator('[data-accessory-tool=place]').click();
+  const target = await bodyPoint(page, 4);
+  await page.mouse.click(target.x, target.y);
+  await expect.poll(() => page.evaluate(() => window.__digitalMatterLab!.conversion.rigidAccessoryCount())).toBe(1);
+  await expect.poll(() => page.evaluate(() => window.__digitalMatterLab!.conversion.rigidWeldCount())).toBeGreaterThan(0);
+  await expect(workspace.getByTestId('rigid-weld-list')).toContainText('Plate');
+  await expect(workspace.locator('[data-accessory-tool=move]')).toBeEnabled();
+  await workspace.locator('[data-accessory-tool=rotate]').click();
+  await expect(workspace.locator('[data-accessory-tool=rotate]')).toHaveAttribute('aria-checked', 'true');
+  await workspace.locator('[data-accessory-tool=scale]').click();
+  await expect(workspace.locator('[data-accessory-tool=scale]')).toHaveAttribute('aria-checked', 'true');
+
+  const play = workspace.getByTestId('simulation-play');
+  await expect(play).toBeEnabled();
+  await play.click();
+  await expect(play).toHaveText('Pause');
+  await page.waitForTimeout(800);
+  expect(await page.evaluate(() => window.__digitalMatterLab!.conversion.maxRigidWeldSeparation())).toBeLessThan(0.03);
+  await workspace.getByTestId('reset').click();
+  expect(await page.evaluate(() => window.__digitalMatterLab!.conversion.rigidAccessoryCount())).toBe(1);
+  await workspace.getByTestId('rigid-weld-delete').click();
+  await expect.poll(() => page.evaluate(() => window.__digitalMatterLab!.conversion.rigidAccessoryCount())).toBe(0);
 });
 
 test('assembly editor brushes welds and shows every vertex in structure mode', async ({ page }) => {

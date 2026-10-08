@@ -11,6 +11,10 @@ export class DistanceConstraints {
   readonly b: Uint32Array;
   readonly rest: Float32Array;
   readonly initialRest: Float32Array;
+  /** Per-constraint stretch compliance. Overrides the scalar passed to {@link solveDistances}. */
+  stretchCompliance: Float32Array | null = null;
+  /** Per-constraint compression compliance. Overrides the scalar passed to {@link solveDistances}. */
+  compressionCompliance: Float32Array | null = null;
 
   constructor(pairs: ArrayLike<number>, positions: Float32Array) {
     this.count = pairs.length / 2;
@@ -82,6 +86,9 @@ export function solveDistances(
 ): void {
   const stretchAlpha = compliance / (h * h);
   const compressAlpha = compressionCompliance / (h * h);
+  const stretchByConstraint = constraints.stretchCompliance;
+  const compressByConstraint = constraints.compressionCompliance;
+  const invH2 = 1 / (h * h);
   const { a, b, rest, count } = constraints;
   for (let c = 0; c < count; c++) {
     const i = a[c];
@@ -95,7 +102,14 @@ export function solveDistances(
     const dz = positions[i * 3 + 2] - positions[j * 3 + 2];
     const length = Math.sqrt(dx * dx + dy * dy + dz * dz);
     if (length < 1e-9) continue;
-    const alpha = length < rest[c] ? compressAlpha : stretchAlpha;
+    const alpha =
+      length < rest[c]
+        ? compressByConstraint
+          ? compressByConstraint[c] * invH2
+          : compressAlpha
+        : stretchByConstraint
+          ? stretchByConstraint[c] * invH2
+          : stretchAlpha;
     const s = -(length - rest[c]) / (w + alpha) / length;
     positions[i * 3] += dx * s * wi;
     positions[i * 3 + 1] += dy * s * wi;
@@ -201,9 +215,11 @@ export function applyDistancePlasticity(
   positions: Float32Array,
   constraints: DistanceConstraints,
   settings: PlasticSettings,
+  enabled?: Uint8Array | null,
 ): number {
   let changed = 0;
   for (let c = 0; c < constraints.count; c++) {
+    if (enabled && enabled[c] === 0) continue;
     const current = distance(positions, constraints.a[c], constraints.b[c]);
     const updated = creep(current, constraints.rest[c], constraints.initialRest[c], settings);
     if (updated !== constraints.rest[c]) {

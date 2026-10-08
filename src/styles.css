@@ -128,6 +128,28 @@ body,
   flex-wrap: wrap;
 }
 
+.conversion-editor .view-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  max-width: none;
+  border: none;
+  overflow: visible;
+}
+
+.conversion-editor .view-stack > .tool-group {
+  display: flex;
+  max-width: none;
+}
+
+.conversion-editor .view-stack > .tool-button {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  flex: none;
+  width: 100%;
+}
+
 .assembly-editor .tool-button {
   flex: 0 0 auto;
 }
@@ -143,6 +165,10 @@ body,
 }
 
 .assembly-viewport.is-editing {
+  pointer-events: auto;
+}
+
+.conversion-viewport {
   pointer-events: auto;
 }
 

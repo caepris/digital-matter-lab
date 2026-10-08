@@ -1,8 +1,11 @@
 import * as THREE from 'three';
 import type { ConvertedSurface } from '../simulation/conversion/convertSurface';
-import type { SourceMesh } from '../simulation/conversion/sourceMeshes';
+import { particleMaterials, type SourceMesh } from '../simulation/conversion/sourceMeshes';
 import type { SimulationFrame } from '../simulation/types';
 import type { ConversionView } from '../ui/ConversionControls';
+import type { RigidWeldPart } from '../conversion-editor/RigidWeldDocument';
+import { matrixForRigidWeld, pointForAnchor } from '../simulation/conversion/autoWeldRigid';
+import { rigidAccessory, type RigidAccessoryId } from '../simulation/conversion/rigidAccessories';
 import { PanelView, type BodyVisual } from './PanelView';
 import { createParticleOverlay, type ParticleOverlay } from './StructureOverlay';
 
@@ -50,6 +53,18 @@ export class ConversionVisual {
     this.body.setSectionVisible(visible);
   }
 
+  syncRigidWelds(parts: readonly RigidWeldPart[], source: SourceMesh, selectedId: string | null, editing: boolean): void {
+    this.body.syncRigidWelds(parts, source, selectedId, editing);
+  }
+
+  rigidWeldProxy(id: string): THREE.Mesh | undefined {
+    return this.body.rigidWeldProxy(id);
+  }
+
+  rigidWeldAt(ray: THREE.Ray): string | null {
+    return this.body.rigidWeldAt(ray);
+  }
+
   beginSectionDrag(ray: THREE.Ray): boolean {
     return this.body.beginSectionDrag(ray);
   }
@@ -65,6 +80,10 @@ export class ConversionVisual {
   /** Half the distance between the rendered outer and inner shell surfaces at vertex 0. */
   get renderedHalfThickness(): number {
     return this.body.renderedHalfThickness;
+  }
+
+  get generatedRegionColorCount(): number {
+    return this.body.generatedRegionColorCount;
   }
 
   render(frame: SimulationFrame, pressSelected: boolean): void {
@@ -101,7 +120,16 @@ class ConversionBodyVisual implements BodyVisual {
   private readonly shellCapStencil = new THREE.Group();
   private capMaterial: THREE.MeshStandardMaterial | null = null;
   private sourceColor = 0xffffff;
+  private materialIds: Uint8Array | null = null;
+  private generatedMaterialIds: Uint8Array | null = null;
+  private regionColors: number[] = [];
+  private fabricColors: number[] = [];
   private readonly sectionGizmo = new THREE.Group();
+  private readonly rigidWelds = new THREE.Group();
+  private readonly weldMarkers = new THREE.Group();
+  private readonly rigidWeldMeshes = new Map<string, THREE.Mesh>();
+  private rigidWeldParts: readonly RigidWeldPart[] = [];
+  private accessoryEditing = true;
   private readonly clippingPlane = new THREE.Plane(new THREE.Vector3(-1, 0, 0), 0);
   private sectionMinX = -1;
   private sectionMaxX = 1;
@@ -129,6 +157,17 @@ class ConversionBodyVisual implements BodyVisual {
     return 0.5 * Math.hypot(p[0] - p[inner], p[1] - p[inner + 1], p[2] - p[inner + 2]);
   }
 
+  get generatedRegionColorCount(): number {
+    const colors = this.generatedGeometry?.getAttribute('color') as THREE.BufferAttribute | undefined;
+    if (!colors) return 0;
+    const unique = new Set<string>();
+    const values = colors.array as Float32Array;
+    for (let i = 0; i < values.length; i += 3) {
+      unique.add(`${values[i].toFixed(4)}:${values[i + 1].toFixed(4)}:${values[i + 2].toFixed(4)}`);
+    }
+    return unique.size;
+  }
+
   configure(source: SourceMesh, converted: ConvertedSurface | null, thickness: number): void {
     this.clear();
     this.converted = converted;
@@ -153,6 +192,18 @@ class ConversionBodyVisual implements BodyVisual {
     this.sourceMesh.frustumCulled = false;
     this.object.add(this.sourceMesh);
     this.sourceColor = source.color;
+    this.materialIds = source.materials.length > 0 ? source.materialIds : null;
+    this.generatedMaterialIds =
+      converted && source.materials.length > 0
+        ? particleMaterials(
+            source,
+            converted.positions.length / 3,
+            converted.triangles,
+            converted.sourceBindings,
+          )
+        : null;
+    this.regionColors = source.materials.map((material) => material.color);
+    this.fabricColors = source.materials.map((material) => material.fabricColor);
     this.buildCapStencil(this.sourceGeometry, this.sourceCapStencil);
     this.object.add(this.sourceCapStencil);
 
@@ -163,6 +214,7 @@ class ConversionBodyVisual implements BodyVisual {
     this.object.add(this.supports);
     this.buildSectionGizmo(source.positions);
     this.object.add(this.sectionGizmo);
+    this.object.add(this.rigidWelds, this.weldMarkers);
 
     if (converted) {
       this.generatedCenterAttribute = new THREE.BufferAttribute(converted.positions.slice(), 3);
@@ -175,16 +227,18 @@ class ConversionBodyVisual implements BodyVisual {
       this.generatedGeometry.setAttribute('position', this.generatedThickAttribute);
       this.generatedGeometry.setIndex(new THREE.BufferAttribute(generatedIndices, 1));
       this.generatedMaterial = new THREE.MeshStandardMaterial({
-        color: GENERATED_COLOR,
+        color: this.generatedMaterialIds ? 0xffffff : GENERATED_COLOR,
         roughness: 0.62,
         metalness: 0,
         side: THREE.DoubleSide,
+        vertexColors: this.generatedMaterialIds !== null,
       });
       this.generatedMesh = new THREE.Mesh(this.generatedGeometry, this.generatedMaterial);
       this.generatedMesh.castShadow = true;
       this.generatedMesh.receiveShadow = true;
       this.generatedMesh.frustumCulled = false;
       this.object.add(this.generatedMesh);
+      this.paintGeneratedColors();
       this.buildCapStencil(this.generatedGeometry, this.shellCapStencil);
       this.object.add(this.shellCapStencil);
       this.generatedOverlay = createParticleOverlay(this.generatedCenterAttribute, converted.stretchPairs, 0.035);
@@ -200,14 +254,102 @@ class ConversionBodyVisual implements BodyVisual {
   update(frame: SimulationFrame): void {
     const particles = frame.particles;
     if (!particles || !this.converted) return;
-    const normals = vertexNormals(particles, this.converted.triangles);
-    this.bindSource(particles, normals);
+    const shellParticles = particles.subarray(0, this.converted.positions.length);
+    const normals = vertexNormals(shellParticles, this.converted.triangles);
+    this.bindSource(shellParticles, normals);
     if (this.generatedCenterAttribute) {
-      (this.generatedCenterAttribute.array as Float32Array).set(particles);
+      (this.generatedCenterAttribute.array as Float32Array).set(shellParticles);
       this.generatedCenterAttribute.needsUpdate = true;
     }
-    this.updateGeneratedSurface(particles, normals);
+    this.updateGeneratedSurface(shellParticles, normals);
     this.generatedOverlay?.update();
+    if (!this.accessoryEditing) this.updateRigidWeldParticles(particles);
+  }
+
+  syncRigidWelds(parts: readonly RigidWeldPart[], source: SourceMesh, selectedId: string | null, editing: boolean): void {
+    this.rigidWeldParts = parts;
+    this.accessoryEditing = editing;
+    const keep = new Set(parts.map((part) => part.id));
+    for (const [id, mesh] of this.rigidWeldMeshes) {
+      if (keep.has(id)) continue;
+      mesh.removeFromParent();
+      mesh.geometry.dispose();
+      (mesh.material as THREE.Material).dispose();
+      this.rigidWeldMeshes.delete(id);
+    }
+    for (const part of parts) {
+      let mesh = this.rigidWeldMeshes.get(part.id);
+      if (!mesh) {
+        const preset = rigidAccessory(part.presetId as RigidAccessoryId);
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.BufferAttribute(preset.positions.slice(), 3));
+        geometry.setIndex(new THREE.BufferAttribute(preset.triangles, 1));
+        geometry.computeVertexNormals();
+        mesh = new THREE.Mesh(
+          geometry,
+          new THREE.MeshStandardMaterial({
+            color: part.valid ? preset.color : 0xe45b64,
+            roughness: 0.32,
+            metalness: 0.72,
+            emissive: part.id === selectedId ? 0x1c5b4e : 0x000000,
+            emissiveIntensity: 0.7,
+          }),
+        );
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        mesh.userData.rigidWeldId = part.id;
+        this.rigidWelds.add(mesh);
+        this.rigidWeldMeshes.set(part.id, mesh);
+      }
+      mesh.matrix.copy(matrixForRigidWeld(part));
+      mesh.matrix.decompose(mesh.position, mesh.quaternion, mesh.scale);
+      const material = mesh.material as THREE.MeshStandardMaterial;
+      const preset = rigidAccessory(part.presetId as RigidAccessoryId);
+      material.color.setHex(part.valid ? preset.color : 0xe45b64);
+      material.emissive.setHex(part.id === selectedId ? 0x1c5b4e : 0x000000);
+    }
+    this.weldMarkers.clear();
+    const markerGeometry = new THREE.SphereGeometry(0.012, 8, 6);
+    const markerMaterial = new THREE.MeshBasicMaterial({ color: 0xffcf5a });
+    for (const part of parts) {
+      for (const weld of part.welds) {
+        const marker = new THREE.Mesh(markerGeometry, markerMaterial);
+        marker.position.copy(pointForAnchor(weld.sourceAnchor, source.positions, source.triangles));
+        this.weldMarkers.add(marker);
+      }
+    }
+    this.weldMarkers.visible = editing;
+  }
+
+  rigidWeldProxy(id: string): THREE.Mesh | undefined {
+    return this.rigidWeldMeshes.get(id);
+  }
+
+  rigidWeldAt(ray: THREE.Ray): string | null {
+    const raycaster = new THREE.Raycaster();
+    raycaster.ray.copy(ray);
+    const hit = raycaster.intersectObjects([...this.rigidWeldMeshes.values()], false)[0];
+    return hit?.object.userData.rigidWeldId ?? null;
+  }
+
+  private updateRigidWeldParticles(particles: Float32Array): void {
+    if (!this.converted) return;
+    let offset = this.converted.positions.length / 3;
+    for (const part of this.rigidWeldParts) {
+      const mesh = this.rigidWeldMeshes.get(part.id);
+      const preset = rigidAccessory(part.presetId as RigidAccessoryId);
+      if (mesh) {
+        const attribute = mesh.geometry.getAttribute('position') as THREE.BufferAttribute;
+        const values = attribute.array as Float32Array;
+        values.set(particles.subarray(offset * 3, offset * 3 + values.length));
+        attribute.needsUpdate = true;
+        mesh.geometry.computeVertexNormals();
+        mesh.position.set(0, 0, 0);
+        mesh.quaternion.identity();
+        mesh.scale.set(1, 1, 1);
+      }
+      offset += preset.positions.length / 3;
+    }
   }
 
   setColor(color: number): void {
@@ -320,10 +462,64 @@ class ConversionBodyVisual implements BodyVisual {
     if (this.generatedMesh) this.generatedMesh.visible = shellShown;
     if (this.sourceOverlay) this.sourceOverlay.object.visible = this.structureVisible && !shellShown;
     if (this.generatedOverlay) this.generatedOverlay.object.visible = this.structureVisible && shellShown;
+    this.rigidWelds.visible = true;
+    this.weldMarkers.visible = this.accessoryEditing && !shellShown;
     this.sectionGizmo.visible = this.sectionVisible;
     this.sourceCapStencil.visible = this.sectionVisible && !shellShown;
     this.shellCapStencil.visible = this.sectionVisible && shellShown;
-    this.capMaterial?.color.setHex(shellShown ? CAP_COLOR : this.sourceColor).multiplyScalar(shellShown ? 1 : 0.62);
+    const capColor = this.view === 'material' ? 0x5c6570 : shellShown ? CAP_COLOR : this.sourceColor;
+    this.capMaterial?.color.setHex(capColor).multiplyScalar(this.view === 'material' || shellShown ? 1 : 0.62);
+    this.paintSourceColor();
+  }
+
+  /** Multi-material sources show fabric colors, or flat map colors in Material view. */
+  private paintSourceColor(): void {
+    if (!this.sourceMaterial || !this.sourceGeometry) return;
+    if (!this.materialIds) {
+      this.sourceMaterial.vertexColors = false;
+      this.sourceMaterial.color.setHex(this.sourceColor);
+      this.sourceMaterial.needsUpdate = true;
+      return;
+    }
+    const count = this.materialIds.length;
+    let colors = this.sourceGeometry.getAttribute('color') as THREE.BufferAttribute | undefined;
+    if (!colors || colors.count !== count) {
+      colors = new THREE.BufferAttribute(new Float32Array(count * 3), 3);
+      this.sourceGeometry.setAttribute('color', colors);
+    }
+    const array = colors.array as Float32Array;
+    const palette = this.view === 'material' ? this.regionColors : this.fabricColors;
+    const color = new THREE.Color();
+    for (let i = 0; i < count; i++) {
+      // Vertex colors are linear; setHex converts the sRGB palette like material colors.
+      color.setHex(palette[this.materialIds[i]] ?? this.sourceColor);
+      array[i * 3] = color.r;
+      array[i * 3 + 1] = color.g;
+      array[i * 3 + 2] = color.b;
+    }
+    colors.needsUpdate = true;
+    this.sourceMaterial.vertexColors = true;
+    this.sourceMaterial.color.setHex(0xffffff);
+    this.sourceMaterial.needsUpdate = true;
+  }
+
+  /** Duplicate region colors onto the generated shell's outer and inner layers. */
+  private paintGeneratedColors(): void {
+    if (!this.generatedGeometry || !this.generatedMaterialIds) return;
+    const count = this.generatedMaterialIds.length;
+    const colors = new THREE.BufferAttribute(new Float32Array(count * 2 * 3), 3);
+    const array = colors.array as Float32Array;
+    const color = new THREE.Color();
+    for (let layer = 0; layer < 2; layer++) {
+      for (let i = 0; i < count; i++) {
+        color.setHex(this.fabricColors[this.generatedMaterialIds[i]] ?? GENERATED_COLOR);
+        const offset = (layer * count + i) * 3;
+        array[offset] = color.r;
+        array[offset + 1] = color.g;
+        array[offset + 2] = color.b;
+      }
+    }
+    this.generatedGeometry.setAttribute('color', colors);
   }
 
   private buildCapStencil(geometry: THREE.BufferGeometry, group: THREE.Group): void {
@@ -432,6 +628,8 @@ class ConversionBodyVisual implements BodyVisual {
     this.sourceGeometry = null;
     this.generatedGeometry = null;
     this.sourceMaterial = null;
+    this.materialIds = null;
+    this.regionColors = [];
     this.generatedMaterial = null;
     this.sourceOverlay = null;
     this.generatedOverlay = null;
@@ -440,6 +638,19 @@ class ConversionBodyVisual implements BodyVisual {
     this.generatedThickAttribute = null;
     this.generatedThickPositions = new Float32Array();
     this.bindingOffsets = new Float32Array();
+    for (const mesh of this.rigidWeldMeshes.values()) {
+      mesh.geometry.dispose();
+      (mesh.material as THREE.Material).dispose();
+    }
+    this.rigidWeldMeshes.clear();
+    this.rigidWelds.clear();
+    for (const child of this.weldMarkers.children) {
+      const marker = child as THREE.Mesh;
+      marker.geometry.dispose();
+      (marker.material as THREE.Material).dispose();
+    }
+    this.weldMarkers.clear();
+    this.rigidWeldParts = [];
   }
 }
 

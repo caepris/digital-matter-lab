@@ -1,13 +1,20 @@
 import type { ToolId } from '../simulation/types';
+import type { AccessoryTransformTool } from '../conversion-editor/RigidWeldDocument';
+import { listRigidAccessories, type RigidAccessoryId } from '../simulation/conversion/rigidAccessories';
 
 /** What the viewport renders: the detailed source mesh or the filled thin shell driving it. */
-export type ConversionView = 'source' | 'shell';
+export type ConversionView = 'source' | 'shell' | 'material';
 
 export const CONVERSION_SOURCES = [
   {
     id: 'tshirt',
     label: 'T-shirt',
     description: 'An upright rigid T-shirt on a hanger. Its shell drapes like cotton jersey.',
+  },
+  {
+    id: 'denim-jacket',
+    label: 'Denim jacket',
+    description: 'A cropped open-front denim jacket with a sewn-in cotton hood, cuffs, and zipper facing. Each fabric keeps its own drape.',
   },
   {
     id: 'curtain',
@@ -43,6 +50,8 @@ export interface ConversionControlModel {
   view: ConversionView;
   structureVisible: boolean;
   sectionVisible: boolean;
+  /** The current source has a material map, so Material view can color it. */
+  materialMapped: boolean;
   /** Shell thickness in meters. The slider and readout show centimeters. */
   thickness: number;
   generated: ConversionGeneratedStats | null;
@@ -50,6 +59,11 @@ export interface ConversionControlModel {
   status: string;
   simulationPaused: boolean;
   tool: ToolId;
+  accessoryPresetId: RigidAccessoryId;
+  accessoryTool: AccessoryTransformTool;
+  accessoryParts: readonly { id: string; label: string; valid: boolean; weldCount: number }[];
+  selectedAccessoryId: string | null;
+  accessoriesValid: boolean;
   legend: ConversionLegendEntry[];
 }
 
@@ -63,11 +77,16 @@ export interface ConversionControlHandlers {
   onSimulationPaused(paused: boolean): void;
   onReset(): void;
   onTool(tool: ToolId): void;
+  onAccessoryPreset(id: RigidAccessoryId): void;
+  onAccessoryTool(tool: AccessoryTransformTool): void;
+  onAccessorySelect(id: string | null): void;
+  onAccessoryDelete(): void;
 }
 
 const VIEWS: { id: ConversionView; label: string; hint: string }[] = [
   { id: 'shell', label: 'Thin shell', hint: 'Show the filled simulation shell' },
   { id: 'source', label: 'Source mesh', hint: 'Show the detailed source mesh driven by the shell' },
+  { id: 'material', label: 'Material', hint: 'Color the source mesh by its material map' },
 ];
 
 const SIM_TOOLS: { id: ToolId; label: string; hint: string }[] = [
@@ -79,8 +98,15 @@ const SIM_TOOLS: { id: ToolId; label: string; hint: string }[] = [
 const SECTION_HINT = {
   shell: 'Drag the section plane left or right to inspect the filled shell.',
   source: 'Drag the section plane left or right to inspect the source mesh.',
+  material: 'Drag the section plane left or right to inspect the material map.',
 } satisfies Record<ConversionView, string>;
-const CAMERA_HINT = 'Middle-drag orbit · Right-drag pan · Scroll or trackpad zoom';
+const CAMERA_HINT = 'Two-finger scroll or middle-drag orbit · Right-drag pan · Pinch or wheel zoom';
+const ACCESSORY_TOOLS: { id: AccessoryTransformTool; label: string }[] = [
+  { id: 'place', label: 'Place' },
+  { id: 'move', label: 'Move' },
+  { id: 'rotate', label: 'Rotate' },
+  { id: 'scale', label: 'Scale' },
+];
 
 function element<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text?: string): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag);
@@ -112,6 +138,11 @@ export class ConversionControls {
   private readonly thickness: HTMLInputElement;
   private readonly thicknessValue = element('output', 'value-output');
   private readonly sectionButton: HTMLButtonElement;
+  private readonly accessoryPreset: HTMLSelectElement;
+  private readonly accessoryPart: HTMLSelectElement;
+  private readonly accessoryStatus = element('p', 'context-description');
+  private readonly accessoryButtons = new Map<AccessoryTransformTool, HTMLButtonElement>();
+  private readonly accessoryDelete: HTMLButtonElement;
   private readonly stats = element('p', 'context-description', 'Generating shell…');
   private readonly play: HTMLButtonElement;
   private readonly resetButton: HTMLButtonElement;
@@ -129,10 +160,13 @@ export class ConversionControls {
 
     const display = this.section('View');
     const views = this.radioGroup('Viewport display');
+    views.classList.add('view-stack');
+    const meshViews = element('div', 'tool-group');
+    views.append(meshViews);
     for (const view of VIEWS) {
       const button = this.radio(view.label, () => handlers.onView(view.id), view.hint);
       button.dataset.view = view.id;
-      views.append(button);
+      (view.id === 'material' ? views : meshViews).append(button);
       this.viewButtons.set(view.id, button);
     }
     this.sectionButton = this.button('Section view', 'section-tool', () => {
@@ -158,6 +192,34 @@ export class ConversionControls {
     this.structure = this.check('Structure', 'structure-toggle', handlers.onStructure);
     this.structure.title = 'Show mesh vertices and edges';
     source.append(this.field('Source', this.sourceSelect), this.sourceDescription, this.structure.parentElement!);
+
+    const rigidWelds = this.section('Rigid welds');
+    const accessoryDefinitions = listRigidAccessories();
+    this.accessoryPreset = this.select(
+      accessoryDefinitions.map((item) => [item.id, item.label]),
+      (value) => handlers.onAccessoryPreset(value as RigidAccessoryId),
+      'Rigid accessory',
+    );
+    this.accessoryPreset.dataset.testid = 'rigid-weld-preset';
+    const accessoryTools = this.radioGroup('Rigid weld tool');
+    for (const tool of ACCESSORY_TOOLS) {
+      const button = this.radio(tool.label, () => handlers.onAccessoryTool(tool.id), `${tool.label} a rigid welded mesh`);
+      button.dataset.accessoryTool = tool.id;
+      accessoryTools.append(button);
+      this.accessoryButtons.set(tool.id, button);
+    }
+    this.accessoryPart = this.select([], (value) => handlers.onAccessorySelect(value || null), 'Placed rigid mesh');
+    this.accessoryPart.dataset.testid = 'rigid-weld-list';
+    this.accessoryDelete = this.button('Delete', 'rigid-weld-delete', handlers.onAccessoryDelete);
+    const accessoryActions = element('div', 'action-row');
+    accessoryActions.append(this.accessoryDelete);
+    rigidWelds.append(
+      this.field('Mesh', this.accessoryPreset),
+      accessoryTools,
+      this.field('Placed', this.accessoryPart),
+      accessoryActions,
+      this.accessoryStatus,
+    );
 
     const shell = this.section('Thin shell');
     this.thickness = element('input', 'brush-range');
@@ -206,12 +268,13 @@ export class ConversionControls {
     this.status.setAttribute('role', 'status');
     this.status.setAttribute('aria-live', 'polite');
     this.legend.hidden = true;
-    this.root.append(heading, display, source, shell, run, this.status);
+    this.root.append(heading, display, source, rigidWelds, shell, run, this.status);
   }
 
   sync(model: ConversionControlModel): void {
     this.syncRadios(this.viewButtons, model.view);
     this.syncRadios(this.toolButtons, model.tool);
+    this.syncRadios(this.accessoryButtons, model.accessoryTool);
 
     this.sourceSelect.value = model.sourceId;
     this.sourceDescription.textContent = CONVERSION_SOURCES.find((item) => item.id === model.sourceId)?.description ?? '';
@@ -221,10 +284,41 @@ export class ConversionControls {
 
     const ready = model.generated !== null;
     this.thickness.disabled = !ready;
-    this.play.disabled = !ready;
+    this.play.disabled = !ready || !model.accessoriesValid;
     this.resetButton.disabled = !ready;
     this.viewButtons.get('shell')!.disabled = !ready;
+    const materialButton = this.viewButtons.get('material')!;
+    materialButton.disabled = !model.materialMapped;
+    materialButton.title = model.materialMapped
+      ? 'Color the source mesh by its material map'
+      : 'This source uses one material';
     for (const button of this.toolButtons.values()) button.disabled = !ready;
+    this.accessoryPreset.value = model.accessoryPresetId;
+    this.accessoryPart.replaceChildren();
+    const none = document.createElement('option');
+    none.value = '';
+    none.textContent = model.accessoryParts.length === 0 ? 'No rigid meshes' : 'Select a rigid mesh';
+    this.accessoryPart.append(none);
+    for (const part of model.accessoryParts) {
+      const option = document.createElement('option');
+      option.value = part.id;
+      option.textContent = `${part.label} · ${part.weldCount} weld${part.weldCount === 1 ? '' : 's'}${part.valid ? '' : ' · detached'}`;
+      this.accessoryPart.append(option);
+    }
+    this.accessoryPart.value = model.selectedAccessoryId ?? '';
+    const selectedAccessory = model.accessoryParts.find((part) => part.id === model.selectedAccessoryId);
+    this.accessoryDelete.disabled = !selectedAccessory;
+    for (const [tool, button] of this.accessoryButtons) {
+      button.disabled = tool !== 'place' && !selectedAccessory;
+    }
+    this.accessoryStatus.textContent =
+      model.accessoryParts.length === 0
+        ? 'Choose a mesh, click Place, then click the source. Contact points weld automatically.'
+        : selectedAccessory
+          ? selectedAccessory.valid
+            ? `${selectedAccessory.weldCount} automatic weld point${selectedAccessory.weldCount === 1 ? '' : 's'}.`
+            : 'Detached: move it back into contact before simulating.'
+          : `${model.accessoryParts.length} rigid mesh${model.accessoryParts.length === 1 ? '' : 'es'} placed.`;
 
     const centimeters = thicknessToCentimeters(model.thickness);
     if (document.activeElement !== this.thickness) this.thickness.value = centimeters.toFixed(1);
@@ -249,7 +343,7 @@ export class ConversionControls {
       row.append(swatch, document.createTextNode(entry.label));
       this.legend.append(row);
     }
-    this.legend.hidden = !model.structureVisible;
+    this.legend.hidden = model.legend.length === 0;
 
     const hint = model.sectionVisible ? SECTION_HINT[model.view] : (SIM_TOOLS.find((tool) => tool.id === model.tool)?.hint ?? '');
     this.hint.textContent = `${hint} · ${CAMERA_HINT}`;
