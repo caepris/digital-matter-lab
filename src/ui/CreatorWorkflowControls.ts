@@ -44,7 +44,8 @@ export class CreatorWorkflowControls {
   private readonly caps = node('div', 'workflow-cap-chips');
   private readonly capStatus = node('span', 'workflow-cap-status');
   private readonly clearCaps = node('button', 'action-button', 'Clear');
-  private readonly capField = node('div', 'workflow-cap-field');
+  /** End-cap picker; the workspace places it in the Path 1 card, the only path it affects. */
+  readonly capField = node('div', 'workflow-cap-field');
   private readonly thickness: HTMLInputElement;
   private readonly thicknessOutput = node('output', 'value-output');
   private readonly thicknessField: HTMLLabelElement;
@@ -116,7 +117,7 @@ export class CreatorWorkflowControls {
     this.clearCaps.dataset.testid = 'workflow-caps-clear';
     this.clearCaps.addEventListener('click', handlers.onClearCaps);
     const capHeader = node('div', 'workflow-cap-header');
-    capHeader.append(node('span', 'field-label', 'Path 1 end caps (click the mesh or a chip)'), this.clearCaps);
+    capHeader.append(node('span', 'field-label', 'End caps (click the mesh or a chip)'), this.clearCaps);
     this.capField.append(capHeader, this.caps, this.capStatus);
 
     this.thickness = this.range('workflow-thickness', 0.2, 5, 0.1, (value) => handlers.onThickness(value));
@@ -147,7 +148,7 @@ export class CreatorWorkflowControls {
     navigation.append(this.previous, this.next);
     primary.append(this.field('Example', this.asset), stage, navigation);
     const details = node('div', 'workflow-detail-controls');
-    details.append(this.capField, this.thicknessField, this.renderToggle.parentElement!, this.mapping.parentElement!, this.sectionToggle.parentElement!, this.sectionField);
+    details.append(this.thicknessField, this.renderToggle.parentElement!, this.mapping.parentElement!, this.sectionToggle.parentElement!, this.sectionField);
     const simulation = node('div', 'workflow-simulation-controls');
     simulation.dataset.testid = 'workflow-simulation-controls';
     const windField = this.field('Wind', this.wind);

@@ -220,6 +220,11 @@ export class CreatorWorkflowPanel {
     this.inspectButton.title = inspected ? 'Close the window (Esc)' : 'Open this viewport in a window';
   }
 
+  /** Adds path-specific controls under the card's status. */
+  addHeadingControls(controls: HTMLElement): void {
+    this.assetNote.after(controls);
+  }
+
   focusInspect(): void {
     this.inspectButton.focus();
   }
@@ -489,6 +494,7 @@ export class CreatorWorkflowWorkspace {
           (path) => this.inspect(this.inspectedPath === path ? null : path),
         ),
     );
+    this.panels.find((panel) => panel.path === 'shell')?.addHeadingControls(this.controls.capField);
     this.comparison.className = 'workflow-comparison';
     this.comparison.append(...this.panels.map((panel) => panel.element));
     this.backdrop.className = 'workflow-inspect-backdrop';

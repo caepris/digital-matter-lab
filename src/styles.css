@@ -201,7 +201,7 @@ body,
 }
 
 .workflow-cap-field {
-  flex: 1 1 420px;
+  margin-top: 8px;
   display: grid;
   gap: 5px;
 }
@@ -1124,10 +1124,6 @@ button:focus-visible,
   }
 
   .workflow-detail-controls .control-field,
-  .workflow-cap-field {
-    flex-basis: 100%;
-    min-width: 0;
-  }
 
   .workflow-navigation {
     justify-content: stretch;
