@@ -10,6 +10,8 @@ export interface CreatorWorkflowHandlers {
   onThickness(value: number): void;
   onShowMapping(value: boolean): void;
   onShowRender(value: boolean): void;
+  onSection(value: boolean): void;
+  onSectionPosition(value: number): void;
   onPrevious(): void;
   onNext(): void;
   onSimulationPaused(value: boolean): void;
@@ -48,6 +50,9 @@ export class CreatorWorkflowControls {
   private readonly thicknessField: HTMLLabelElement;
   private readonly mapping: HTMLInputElement;
   private readonly renderToggle: HTMLInputElement;
+  private readonly sectionToggle: HTMLInputElement;
+  private readonly sectionPosition: HTMLInputElement;
+  private readonly sectionField: HTMLElement;
   private readonly previous = node('button', 'action-button', 'Back');
   private readonly next = node('button', 'action-button', 'Next');
   private readonly play = node('button', 'action-button', 'Play');
@@ -115,10 +120,15 @@ export class CreatorWorkflowControls {
     this.capField.append(capHeader, this.caps, this.capStatus);
 
     this.thickness = this.range('workflow-thickness', 0.2, 5, 0.1, (value) => handlers.onThickness(value));
-    this.thicknessField = this.field('Thickness (Paths 1 and 3)', this.thickness);
+    this.thicknessField = this.field('Thickness', this.thickness);
     this.thicknessField.append(this.thicknessOutput);
     this.mapping = this.check('Show simulation mesh overlay', 'workflow-mapping', handlers.onShowMapping);
     this.renderToggle = this.check('Show render mesh', 'workflow-render', handlers.onShowRender);
+    this.sectionToggle = this.check('Section view', 'workflow-section', handlers.onSection);
+    this.sectionPosition = this.range('workflow-section-position', 0.02, 0.98, 0.01, (value) =>
+      handlers.onSectionPosition(value),
+    );
+    this.sectionField = this.field('Section position', this.sectionPosition);
     this.wind = this.range('workflow-wind', 0, 8, 0.25, (value) => handlers.onWind(value));
     for (const button of [this.previous, this.next, this.play, this.reset, this.resetView]) button.type = 'button';
     this.resetView.dataset.testid = 'workflow-reset-view';
@@ -137,7 +147,7 @@ export class CreatorWorkflowControls {
     navigation.append(this.previous, this.next);
     primary.append(this.field('Example', this.asset), stage, navigation);
     const details = node('div', 'workflow-detail-controls');
-    details.append(this.capField, this.thicknessField, this.renderToggle.parentElement!, this.mapping.parentElement!);
+    details.append(this.capField, this.thicknessField, this.renderToggle.parentElement!, this.mapping.parentElement!, this.sectionToggle.parentElement!, this.sectionField);
     const simulation = node('div', 'workflow-simulation-controls');
     simulation.dataset.testid = 'workflow-simulation-controls';
     const windField = this.field('Wind', this.wind);
@@ -203,8 +213,10 @@ export class CreatorWorkflowControls {
     this.thickness.value = String(state.thicknessCm);
     this.thicknessOutput.value = `${state.thicknessCm.toFixed(1)} cm`;
     this.mapping.checked = state.showMapping;
-    this.mapping.disabled = !state.showRender;
     this.renderToggle.checked = state.showRender;
+    this.sectionToggle.checked = state.section;
+    this.sectionField.hidden = !state.section;
+    this.sectionPosition.value = String(state.sectionPosition);
     this.wind.value = String(state.wind);
     this.windOutput.value = `${state.wind.toFixed(1)} m/s`;
     this.play.textContent = state.simulationPaused ? 'Play' : 'Pause';

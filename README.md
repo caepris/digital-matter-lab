@@ -55,8 +55,12 @@ inflates the windsock once its mouth is open (Path 3, or Path 1 with the mouth m
 end cap). Garments hang from the neckline and sleeves and hoods are sewn on. Simulate shows
 a settled drape, and Reset returns to it. Drag the cloth to grab it and drag empty space to
 orbit. Two-finger scroll or shift-drag pans, pinch zooms, and **Reset view** restores the
-camera. Uncheck **Show render mesh** to see only the simulation mesh, drawn as a solid teal
-surface with its wireframe.
+camera. Every simulation mesh is drawn at the chosen thickness, with its wireframe on both
+faces. Uncheck **Show render mesh** to see only the simulation mesh as a solid teal shell.
+**Section view** cuts all three viewports at a plane across the model (move it with
+**Section position**) and fills the cut wall, so the thickness of the shell, the plane, and
+the thickened surface is visible. **Inspect** on any path opens its viewport in a pop-up
+window; **Close**, Esc, or a click outside closes it.
 
 The editor's numbered sidebar guides the workflow: configure and place a part, select it
 from the viewport or part list, transform it, then join touching parts. Position, rotation,

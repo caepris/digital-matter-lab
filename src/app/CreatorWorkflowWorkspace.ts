@@ -31,31 +31,10 @@ import {
 import { ConvertedShellSimulation } from '../simulation/conversion/ConvertedShellSimulation';
 import type { ToolId } from '../simulation/types';
 
-const PATH_COPY: Record<
-  WorkflowPath,
-  { title: string; submits: string; builds: string; simulates: string; accent: string }
-> = {
-  shell: {
-    title: 'Engine-generated shell',
-    submits: 'An arbitrary mesh, plus which regions are end caps',
-    builds: 'A thin shell with thickness around every non-cap face',
-    simulates: 'The generated shell; end caps render and ride along',
-    accent: '#7fa3ff',
-  },
-  plane: {
-    title: 'Creator simulation plane',
-    submits: 'An arbitrary mesh plus one thin plane that intersects it',
-    builds: 'Bindings from every render vertex to the plane',
-    simulates: 'Only the creator plane; the mesh follows it',
-    accent: '#42d6c0',
-  },
-  thicken: {
-    title: 'Engine-thickened surface',
-    submits: 'A zero-thickness open surface with UVs',
-    builds: 'Thickness, a tinted inside, and a rim textured from the UVs',
-    simulates: 'The surface itself, re-thickened every frame',
-    accent: '#f29a62',
-  },
+const PATH_COPY: Record<WorkflowPath, { title: string; accent: string }> = {
+  shell: { title: 'Engine-generated shell', accent: '#7fa3ff' },
+  plane: { title: 'Creator simulation plane', accent: '#42d6c0' },
+  thicken: { title: 'Engine-thickened surface', accent: '#f29a62' },
 };
 
 const CLICK_TOLERANCE = 0.012;
@@ -79,7 +58,7 @@ export class CreatorWorkflowPanel {
   private readonly status = document.createElement('span');
   private readonly assetNote = document.createElement('p');
   private readonly stageStatus = document.createElement('p');
-  private readonly checklist = document.createElement('ul');
+  private readonly inspectButton = document.createElement('button');
   private readonly caption = document.createElement('p');
   private readonly interaction: InteractionRouter;
   private readonly canvas: HTMLCanvasElement;
@@ -98,6 +77,7 @@ export class CreatorWorkflowPanel {
     initial: CreatorWorkflowState,
     onCameraChange: (panel: CreatorWorkflowPanel) => void,
     private readonly onToggleCap: (region: number) => void,
+    onInspect: (path: WorkflowPath) => void,
   ) {
     this.canvas = canvas;
     this.currentState = initial;
@@ -121,20 +101,20 @@ export class CreatorWorkflowPanel {
     title.id = `workflow-title-${path}`;
     this.element.setAttribute('aria-labelledby', title.id);
     this.status.className = 'workflow-stage-badge';
-    titleLine.append(title, this.status);
-    const facts = document.createElement('dl');
-    facts.className = 'workflow-facts';
-    facts.append(
-      this.fact('Creator submits', copy.submits),
-      this.fact('Engine builds', copy.builds),
-      this.fact('Simulates', copy.simulates),
-    );
+    this.inspectButton.type = 'button';
+    this.inspectButton.className = 'workflow-inspect';
+    this.inspectButton.dataset.testid = `workflow-inspect-${path}`;
+    this.inspectButton.addEventListener('click', () => onInspect(path));
+    const badges = document.createElement('div');
+    badges.className = 'workflow-card-badges';
+    badges.append(this.status, this.inspectButton);
+    titleLine.append(title, badges);
+    this.setInspected(false);
     this.assetNote.className = 'workflow-asset-note';
     this.stageStatus.className = 'workflow-path-status';
     this.stageStatus.dataset.testid = `workflow-path-status-${path}`;
     this.stageStatus.setAttribute('aria-live', 'polite');
-    this.checklist.className = 'workflow-checklist';
-    heading.append(eyebrow, titleLine, facts, this.stageStatus, this.checklist, this.assetNote);
+    heading.append(eyebrow, titleLine, this.stageStatus, this.assetNote);
 
     this.viewport.className = 'panel-viewport workflow-viewport';
     this.viewport.dataset.testid = `workflow-viewport-${path}`;
@@ -209,13 +189,6 @@ export class CreatorWorkflowPanel {
     const copy = workflowStageCopy(state.assetId, this.path, state.stage);
     this.stageStatus.textContent = copy.status;
     this.assetNote.textContent = copy.headline;
-    this.checklist.replaceChildren(
-      ...copy.checklist.map((item) => {
-        const li = document.createElement('li');
-        li.textContent = item;
-        return li;
-      }),
-    );
     this.updateCaption();
     if (state.stage === 'simulate') {
       if (!this.simulation || enteredSimulate) this.createSimulation();
@@ -231,6 +204,24 @@ export class CreatorWorkflowPanel {
     this.visual.setData(data, state);
     this.updateCaption();
     if (state.stage === 'simulate') this.createSimulation();
+  }
+
+  setInspected(inspected: boolean): void {
+    this.element.classList.toggle('is-inspected', inspected);
+    if (inspected) {
+      this.element.setAttribute('role', 'dialog');
+      this.element.setAttribute('aria-modal', 'true');
+    } else {
+      this.element.setAttribute('role', 'group');
+      this.element.removeAttribute('aria-modal');
+    }
+    this.inspectButton.textContent = inspected ? 'Close' : 'Inspect';
+    this.inspectButton.setAttribute('aria-pressed', String(inspected));
+    this.inspectButton.title = inspected ? 'Close the window (Esc)' : 'Open this viewport in a window';
+  }
+
+  focusInspect(): void {
+    this.inspectButton.focus();
   }
 
   setLoading(loading: boolean): void {
@@ -380,27 +371,27 @@ export class CreatorWorkflowPanel {
     if (stage === 'simulate') {
       text =
         this.path === 'plane'
-          ? `Simulating ${particles} plane particles. The plane has no body to collide with.`
+          ? `${particles} plane particles. Nothing to collide with.`
           : workflowColliders(this.currentState.assetId, this.path).length > 0
-            ? `Simulating ${particles} particles over the grey collision body. Drag the model to grab it.`
-            : `Simulating ${particles} particles. Drag the model to grab it.`;
+            ? `${particles} particles over a grey collision body. Drag to grab.`
+            : `${particles} particles. Drag to grab.`;
     } else if (this.path === 'shell') {
       text =
         stage === 'submit'
-          ? 'Hover a capped opening and click to mark it as an end cap.'
+          ? 'Click an opening to mark it as an end cap.'
           : endCaps.length === 0
-            ? `Teal shell: ${particles} particles. No end caps, so the full mesh simulates.`
-            : `Teal shell: ${particles} particles. Amber end caps render but are not simulated.`;
+            ? `Teal shell, ${particles} particles. The full mesh simulates.`
+            : `Teal shell, ${particles} particles. Amber caps render but are not simulated.`;
     } else if (this.path === 'plane') {
       text =
         stage === 'submit'
-          ? 'Teal plane: the creator-supplied simulation mesh, intersecting the model.'
-          : `Amber lines bind render vertices to the ${particles}-particle plane.`;
+          ? 'Teal: the creator\'s simulation plane.'
+          : `Amber lines bind the mesh to the ${particles}-particle plane.`;
     } else {
       text =
         stage === 'submit'
-          ? 'Orange: open boundaries. The surface has no thickness.'
-          : `Print outside, tinted inside, rim textured from boundary UVs. ${particles} particles.`;
+          ? 'Orange: open edges. No thickness yet.'
+          : `Print outside, tint inside, rim from boundary UVs. ${particles} particles.`;
     }
     this.caption.textContent = text;
   }
@@ -444,16 +435,6 @@ export class CreatorWorkflowPanel {
     this.simulation?.dispose();
     this.simulation = null;
   }
-
-  private fact(term: string, description: string): HTMLDivElement {
-    const row = document.createElement('div');
-    const dt = document.createElement('dt');
-    dt.textContent = term;
-    const dd = document.createElement('dd');
-    dd.textContent = description;
-    row.append(dt, dd);
-    return row;
-  }
 }
 
 export class CreatorWorkflowWorkspace {
@@ -465,6 +446,10 @@ export class CreatorWorkflowWorkspace {
   private sources: WorkflowSources;
   private loadToken = 0;
   private loadedAssetId: CreatorWorkflowState['assetId'] | null = null;
+  private readonly comparison = document.createElement('div');
+  private readonly backdrop = document.createElement('div');
+  private inspectedPath: WorkflowPath | null = null;
+  private active = false;
 
   constructor(canvas: HTMLCanvasElement) {
     this.sources = proceduralWorkflowSources(this.state.assetId, 0.25);
@@ -484,6 +469,8 @@ export class CreatorWorkflowWorkspace {
       onThickness: (thicknessCm) => this.change({ thicknessCm }),
       onShowMapping: (showMapping) => this.change({ showMapping }),
       onShowRender: (showRender) => this.change({ showRender }),
+      onSection: (section) => this.change({ section }),
+      onSectionPosition: (sectionPosition) => this.change({ sectionPosition }),
       onPrevious: () => this.moveStage(-1),
       onNext: () => this.moveStage(1),
       onSimulationPaused: (simulationPaused) => this.change({ simulationPaused }),
@@ -499,18 +486,41 @@ export class CreatorWorkflowWorkspace {
           this.state,
           (source) => this.synchronizeCamera(source),
           (region) => this.toggleCap(region),
+          (path) => this.inspect(this.inspectedPath === path ? null : path),
         ),
     );
-    const comparison = document.createElement('div');
-    comparison.className = 'workflow-comparison';
-    comparison.append(...this.panels.map((panel) => panel.element));
-    this.element.append(this.controls.root, comparison);
+    this.comparison.className = 'workflow-comparison';
+    this.comparison.append(...this.panels.map((panel) => panel.element));
+    this.backdrop.className = 'workflow-inspect-backdrop';
+    this.backdrop.dataset.testid = 'workflow-inspect-backdrop';
+    this.backdrop.hidden = true;
+    this.backdrop.addEventListener('click', () => this.inspect(null));
+    this.element.append(this.controls.root, this.comparison, this.backdrop);
+    window.addEventListener('keydown', this.onKeyDown);
     this.controls.sync(this.state);
   }
 
   setActive(active: boolean): void {
+    this.active = active;
     for (const panel of this.panels) panel.setActive(active);
     if (active && this.loadedAssetId !== this.state.assetId) void this.loadAsset(this.state.assetId);
+  }
+
+  /** Panels to draw and route input to: only the inspected one while its window is open. */
+  visiblePanels(): CreatorWorkflowPanel[] {
+    return this.inspectedPath ? this.panels.filter((panel) => panel.path === this.inspectedPath) : this.panels;
+  }
+
+  get inspected(): WorkflowPath | null {
+    return this.inspectedPath;
+  }
+
+  /** Opens one path in a pop-up window over the workspace, or closes it. */
+  inspect(path: WorkflowPath | null): void {
+    this.inspectedPath = path;
+    this.backdrop.hidden = path === null;
+    for (const panel of this.panels) panel.setInspected(panel.path === path);
+    this.panels.find((panel) => panel.path === path)?.focusInspect();
   }
 
   setState(patch: Partial<CreatorWorkflowState>): void {
@@ -541,6 +551,10 @@ export class CreatorWorkflowWorkspace {
     return this.panels.map((panel) => panel.view.camera.position.toArray());
   }
 
+  sectionPositions(): (number | null)[] {
+    return this.panels.map((panel) => panel.visual.sectionX);
+  }
+
   cameraTargets(): number[][] {
     return this.panels.map((panel) => panel.controls.target.toArray());
   }
@@ -559,8 +573,13 @@ export class CreatorWorkflowWorkspace {
   }
 
   dispose(): void {
+    window.removeEventListener('keydown', this.onKeyDown);
     for (const panel of this.panels) panel.dispose();
   }
+
+  private readonly onKeyDown = (event: KeyboardEvent): void => {
+    if (event.key === 'Escape' && this.active && this.inspectedPath) this.inspect(null);
+  };
 
   private toggleCap(region: number): void {
     const endCaps = this.state.endCaps.includes(region)

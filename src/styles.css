@@ -371,28 +371,64 @@ body,
   padding: 11px 12px;
 }
 
+.workflow-card-badges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.workflow-inspect {
+  padding: 3px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: rgb(255 255 255 / 0.04);
+  color: #dfe4eb;
+  font-size: 10.5px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.workflow-inspect:hover,
+.workflow-inspect[aria-pressed='true'] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.workflow-comparison > .workflow-card:nth-child(1) { grid-column: 1; }
+.workflow-comparison > .workflow-card:nth-child(2) { grid-column: 2; }
+.workflow-comparison > .workflow-card:nth-child(3) { grid-column: 3; }
+
+/*
+ * The 3D view shows through a transparent hole in the page, so the rest of the page is
+ * hidden while a path is inspected; otherwise it would show through the window.
+ */
+.lab-layout:has(.workflow-card.is-inspected) {
+  visibility: hidden;
+}
+
+.workflow-inspect-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  visibility: visible;
+  pointer-events: auto;
+}
+
+.workflow-card.is-inspected {
+  position: fixed;
+  z-index: 21;
+  visibility: visible;
+  inset: max(32px, 6vh) max(32px, 7vw);
+  border-color: color-mix(in srgb, var(--accent) 60%, var(--border));
+  box-shadow: 0 24px 70px rgb(0 0 0 / 0.6);
+  pointer-events: auto;
+}
+
 .workflow-path-status {
   margin: 8px 0 4px;
   color: var(--accent);
   font-size: 11px;
   font-weight: 650;
-}
-
-.workflow-checklist {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 2px 12px;
-  margin: 0;
-  padding: 0;
-  color: #c5ccd6;
-  font-size: 10.5px;
-  list-style: none;
-}
-
-.workflow-checklist li::before {
-  content: '✓';
-  margin-right: 6px;
-  color: var(--accent);
 }
 
 .workflow-card.is-loading .workflow-viewport::after {
@@ -429,40 +465,6 @@ body,
   color: var(--accent);
   font-size: 10px;
   text-transform: uppercase;
-}
-
-.workflow-facts {
-  display: grid;
-  gap: 5px;
-  margin: 9px 0 0;
-}
-
-.workflow-facts > div {
-  display: grid;
-  grid-template-columns: 82px minmax(0, 1fr);
-  gap: 7px;
-}
-
-.workflow-facts dt {
-  color: var(--muted);
-  font-size: 10.5px;
-  font-weight: 650;
-  text-transform: uppercase;
-}
-
-.workflow-facts dd {
-  margin: 0;
-  color: #cdd3dc;
-  font-size: 11px;
-  line-height: 1.25;
-}
-
-.workflow-facts .is-benefit dd {
-  color: #8ed5b8;
-}
-
-.workflow-facts .is-risk dd {
-  color: #f19ba3;
 }
 
 .workflow-asset-note {
@@ -1074,6 +1076,15 @@ button:focus-visible,
 
   .workflow-card {
     min-height: 500px;
+  }
+
+  .workflow-comparison > .workflow-card:nth-child(n) {
+    grid-column: 1;
+  }
+
+  .workflow-card.is-inspected {
+    inset: 16px;
+    min-height: 0;
   }
 
   .workflow-card-heading {

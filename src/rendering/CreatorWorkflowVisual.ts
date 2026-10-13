@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { workflowAsset } from '../creator-workflow/workflowAssets';
 import { workflowColliders } from '../creator-workflow/workflowPhysics';
 import { boundaryEdges, smoothNormals, weldMap } from '../creator-workflow/surfaceTopology';
+import { sectionFill, sectionFillCapacity } from './sectionFill';
 import {
   displayThickness,
   type CreatorWorkflowState,
@@ -20,6 +21,9 @@ export const WORKFLOW_COLORS = {
   boundary: 0xf29a62,
   proxy: 0x37d6c0,
   proxyWire: 0x0d4a42,
+  proxyInside: 0x1f8f80,
+  proxyRim: 0xa8f5e8,
+  section: 0xc5fff2,
   cap: 0xf6b94b,
   capHover: 0xffe2a6,
   mapping: 0xf6b94b,
@@ -205,22 +209,39 @@ function disposeObject(root: THREE.Object3D): void {
   });
 }
 
+type ShellSurface = 'solid' | 'overlay' | 'none';
+
+interface SectionFillMesh {
+  mesh: THREE.Mesh;
+  attribute: THREE.BufferAttribute;
+}
+
+interface SimulationShell {
+  layout: ThickLayout;
+  thickness: number;
+  inset: number;
+  wire: THREE.BufferAttribute;
+  /** Layout vertex for each wireframe line endpoint. */
+  wireSources: number[];
+  fill: SectionFillMesh | null;
+}
+
 export class CreatorWorkflowVisual {
   readonly root = new THREE.Group();
   private state: CreatorWorkflowState;
   private data: WorkflowPathData;
   private render: RenderMesh | null = null;
   private thick: ThickLayout | null = null;
-  private overlay: ThickLayout | null = null;
-  private overlayThickness = 0;
-  private overlayInset = 0.004;
-  private proxyLines: THREE.BufferAttribute | null = null;
+  private thickFill: SectionFillMesh | null = null;
+  private shell: SimulationShell | null = null;
   private mappingLines: THREE.BufferAttribute | null = null;
   private mappingSources: number[] = [];
   private capOutlines = new Map<number, THREE.LineSegments>();
   private hoverRegion = 0;
   private deformed = new Float32Array();
   private bound = new Float32Array();
+  /** Keeps x <= constant, so the cut faces the default camera. */
+  private readonly clippingPlane = new THREE.Plane(new THREE.Vector3(-1, 0, 0), 0);
 
   constructor(
     private readonly path: WorkflowPath,
@@ -235,6 +256,11 @@ export class CreatorWorkflowVisual {
 
   get pathData(): WorkflowPathData {
     return this.data;
+  }
+
+  /** World x of the section plane, or null when the section view is off. */
+  get sectionX(): number | null {
+    return this.state.section ? this.clippingPlane.constant : null;
   }
 
   update(state: CreatorWorkflowState): void {
@@ -280,19 +306,11 @@ export class CreatorWorkflowVisual {
       normal.needsUpdate = true;
       this.render.mesh.geometry.computeBoundingSphere();
     }
-    if (this.thick) updateThickLayout(this.thick, this.deformed, this.thicknessUnits());
-    if (this.overlay) updateThickLayout(this.overlay, particles, this.overlayThickness, this.overlayInset);
-    if (this.proxyLines) {
-      const pairs = this.data.proxy.stretchPairs;
-      const values = this.proxyLines.array as Float32Array;
-      for (let index = 0; index < pairs.length; index += 1) {
-        const vertex = pairs[index] * 3;
-        values[index * 3] = particles[vertex];
-        values[index * 3 + 1] = particles[vertex + 1];
-        values[index * 3 + 2] = particles[vertex + 2];
-      }
-      this.proxyLines.needsUpdate = true;
+    if (this.thick) {
+      updateThickLayout(this.thick, this.deformed, this.thicknessUnits());
+      if (this.thickFill) this.updateFill(this.thickFill, this.thick);
     }
+    if (this.shell) this.updateShell(this.shell, particles);
     if (this.mappingLines) {
       const values = this.mappingLines.array as Float32Array;
       this.mappingSources.forEach((vertex, line) => {
@@ -316,40 +334,206 @@ export class CreatorWorkflowVisual {
     this.dispose();
     this.render = null;
     this.thick = null;
-    this.overlay = null;
-    this.overlayInset = 0.004;
-    this.proxyLines = null;
+    this.thickFill = null;
+    this.shell = null;
     this.mappingLines = null;
     this.mappingSources = [];
     this.capOutlines.clear();
     const { stage, showMapping, showRender } = this.state;
     const rest = this.data.proxy.positions;
+    const teal = WORKFLOW_COLORS.proxy;
 
+    // The overlay checkbox is hidden at submit, where Path 2's plane is part of the submission.
+    const overlay = stage === 'submit' || showMapping;
     if (!showRender) {
-      this.addSolidProxy();
+      this.addShell({ surface: 'solid', wireOpacity: overlay ? 0.7 : 0, wireColor: WORKFLOW_COLORS.proxyWire, fill: true });
       if (this.path === 'shell' && stage === 'submit') this.addCapOutlines();
       if (this.path === 'thicken' && stage === 'submit') this.addBoundaryLoops();
     } else if (this.path === 'shell') {
       this.addRenderMesh(1);
       if (stage === 'submit') this.addCapOutlines();
-      if (stage === 'build') this.addOverlay(this.thicknessUnits(), 0.34);
-      if (stage === 'build' || (stage === 'simulate' && showMapping)) this.addProxyLines(0.55);
-      if (stage === 'simulate' && showMapping) this.addMapping();
+      if (stage === 'build' && showMapping) {
+        this.addShell({ surface: 'overlay', overlayOpacity: 0.34, wireOpacity: 0.55, wireColor: teal, fill: true });
+      }
+      if (stage === 'simulate' && showMapping) {
+        this.addShell({ surface: 'none', wireOpacity: 0.55, wireColor: teal, fill: true });
+        this.addMapping();
+      }
     } else if (this.path === 'plane') {
-      this.addRenderMesh(stage === 'build' ? 0.42 : 1);
-      this.addOverlay(0.008, stage === 'simulate' && !showMapping ? 0 : 0.32);
-      if (stage !== 'simulate' || showMapping) this.addProxyLines(0.75);
-      if ((stage === 'build' || stage === 'simulate') && showMapping) this.addMapping();
+      this.addRenderMesh(stage === 'build' && showMapping ? 0.42 : 1);
+      if (overlay) this.addShell({ surface: 'overlay', overlayOpacity: 0.32, wireOpacity: 0.75, wireColor: teal, fill: true });
+      if (stage !== 'submit' && showMapping) this.addMapping();
     } else if (stage === 'submit') {
       this.addRenderMesh(1);
       this.addBoundaryLoops();
     } else {
       this.addThickMesh();
-      if (showMapping) this.addProxyLines(0.45);
+      if (showMapping) this.addShell({ surface: 'none', wireOpacity: 0.45, wireColor: teal, fill: false });
     }
     if (stage === 'simulate') this.addColliders();
+    this.applySection();
     this.updateSimulation(rest);
     this.paintCaps();
+  }
+
+  /**
+   * Thickness of the simulation mesh as drawn. Path 3 submits a zero-thickness surface,
+   * and the Path 1 shell does not exist until the engine builds it.
+   */
+  private shellThickness(): number {
+    if (this.state.stage === 'submit' && this.path !== 'plane') return 0;
+    return this.thicknessUnits();
+  }
+
+  /** Path 1 sits just outside the render mesh, Path 2's plane is centered, Path 3 grows outward. */
+  private shellInset(thickness: number, surface: ShellSurface): number {
+    if (this.path === 'plane') return -thickness / 2;
+    if (this.path === 'shell' && surface !== 'solid') return 0.004;
+    return 0;
+  }
+
+  /**
+   * The simulation mesh at its thickness: an optional surface, the wireframe on both
+   * faces, edges across the thickness at open boundaries, and a section fill.
+   */
+  private addShell(options: {
+    surface: ShellSurface;
+    overlayOpacity?: number;
+    wireOpacity: number;
+    wireColor: number;
+    fill: boolean;
+  }): void {
+    const layout = buildThickLayout(this.data.proxy);
+    const thickness = this.shellThickness();
+    const shell: SimulationShell = {
+      layout,
+      thickness,
+      inset: this.shellInset(thickness, options.surface),
+      wire: new THREE.BufferAttribute(new Float32Array(), 3),
+      wireSources: [],
+      fill: null,
+    };
+    if (options.surface !== 'none') {
+      const solid = options.surface === 'solid';
+      const opacity = solid ? 1 : (options.overlayOpacity ?? 0.34);
+      const material = (color: number) =>
+        new THREE.MeshStandardMaterial({
+          color,
+          emissive: color,
+          emissiveIntensity: solid ? 0.12 : 0.25,
+          roughness: solid ? 0.55 : 0.4,
+          transparent: !solid,
+          opacity,
+          depthWrite: solid,
+          side: solid ? THREE.FrontSide : THREE.DoubleSide,
+          polygonOffset: true,
+          polygonOffsetFactor: 1,
+          polygonOffsetUnits: 1,
+        });
+      const mesh = new THREE.Mesh(layout.geometry, [
+        material(WORKFLOW_COLORS.proxy),
+        material(WORKFLOW_COLORS.proxyInside),
+        material(WORKFLOW_COLORS.proxyRim),
+      ]);
+      mesh.name = solid ? 'workflow-solid-proxy' : 'workflow-proxy-overlay';
+      if (!solid) mesh.renderOrder = 3;
+      this.root.add(mesh);
+    }
+
+    const count = this.data.proxy.positions.length / 3;
+    const pairs = this.data.proxy.stretchPairs;
+    for (const layer of thickness > 0 ? [0, count] : [0]) {
+      for (let index = 0; index < pairs.length; index += 1) shell.wireSources.push(pairs[index] + layer);
+    }
+    if (thickness > 0) for (const [a] of layout.edges) shell.wireSources.push(a, a + count);
+    shell.wire = new THREE.BufferAttribute(new Float32Array(shell.wireSources.length * 3), 3);
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', shell.wire);
+    const lines = new THREE.LineSegments(
+      geometry,
+      new THREE.LineBasicMaterial({ color: options.wireColor, transparent: true, opacity: options.wireOpacity }),
+    );
+    lines.name = 'workflow-proxy-wire';
+    lines.renderOrder = 5;
+    if (options.wireOpacity > 0) this.root.add(lines);
+    else disposeObject(lines);
+
+    if (options.fill && this.state.section && thickness > 0) {
+      shell.fill = this.addFill(layout, WORKFLOW_COLORS.section);
+    }
+    this.shell = shell;
+  }
+
+  private updateShell(shell: SimulationShell, particles: Float32Array): void {
+    updateThickLayout(shell.layout, particles, shell.thickness, shell.inset);
+    const source = shell.layout.geometry.getAttribute('position').array as Float32Array;
+    const values = shell.wire.array as Float32Array;
+    shell.wireSources.forEach((vertex, index) => {
+      values[index * 3] = source[vertex * 3];
+      values[index * 3 + 1] = source[vertex * 3 + 1];
+      values[index * 3 + 2] = source[vertex * 3 + 2];
+    });
+    shell.wire.needsUpdate = true;
+    if (shell.fill) this.updateFill(shell.fill, shell.layout);
+  }
+
+  private addFill(layout: ThickLayout, color: number): SectionFillMesh {
+    const attribute = new THREE.BufferAttribute(new Float32Array(sectionFillCapacity(layout.baseTriangles.length)), 3);
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', attribute);
+    const mesh = new THREE.Mesh(
+      geometry,
+      new THREE.MeshBasicMaterial({ color, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -1 }),
+    );
+    mesh.name = 'workflow-section-fill';
+    mesh.frustumCulled = false;
+    mesh.userData.unclipped = true;
+    mesh.renderOrder = 4;
+    this.root.add(mesh);
+    return { mesh, attribute };
+  }
+
+  private updateFill(fill: SectionFillMesh, layout: ThickLayout): void {
+    const positions = layout.geometry.getAttribute('position').array as Float32Array;
+    const count = layout.normals.length / 3;
+    const vertices = sectionFill(
+      positions,
+      layout.baseTriangles,
+      count,
+      this.clippingPlane.constant,
+      fill.attribute.array as Float32Array,
+    );
+    fill.mesh.geometry.setDrawRange(0, vertices);
+    fill.attribute.needsUpdate = true;
+  }
+
+  /** Cuts every layer at the section plane and outlines the plane across the model. */
+  private applySection(): void {
+    if (!this.state.section) return;
+    const box = new THREE.Box3();
+    const point = new THREE.Vector3();
+    const positions = this.data.render.positions;
+    for (let index = 0; index < positions.length; index += 3) {
+      box.expandByPoint(point.set(positions[index], positions[index + 1], positions[index + 2]));
+    }
+    const x = THREE.MathUtils.lerp(box.min.x, box.max.x, this.state.sectionPosition);
+    this.clippingPlane.constant = x;
+    const planes = [this.clippingPlane];
+    this.root.traverse((child) => {
+      if (child.userData.unclipped) return;
+      if (child instanceof THREE.Mesh || child instanceof THREE.LineSegments || child instanceof THREE.Points) {
+        for (const material of [child.material].flat()) material.clippingPlanes = planes;
+      }
+    });
+    const size = box.getSize(new THREE.Vector3());
+    const center = box.getCenter(new THREE.Vector3());
+    const outline = new THREE.LineSegments(
+      new THREE.EdgesGeometry(new THREE.PlaneGeometry(size.z + 0.3, size.y + 0.3).rotateY(Math.PI / 2)),
+      new THREE.LineBasicMaterial({ color: WORKFLOW_COLORS.section, transparent: true, opacity: 0.6 }),
+    );
+    outline.name = 'workflow-section-plane';
+    outline.position.set(x, center.y, center.z);
+    this.root.add(outline);
   }
 
   /** Faint mannequin, hips, or pole that the simulation drapes over. */
@@ -389,6 +573,9 @@ export class CreatorWorkflowVisual {
       transparent: opacity < 1,
       opacity,
       depthWrite: opacity >= 1,
+      polygonOffset: true,
+      polygonOffsetFactor: 1,
+      polygonOffsetUnits: 1,
     });
   }
 
@@ -494,58 +681,7 @@ export class CreatorWorkflowVisual {
     const rim = outer.clone();
     rim.color = tint.clone().lerp(new THREE.Color(WORKFLOW_COLORS.rim), 0.7);
     this.root.add(new THREE.Mesh(this.thick.geometry, [outer, inner, rim]));
-  }
-
-  private addOverlay(thickness: number, opacity: number): void {
-    if (opacity <= 0) return;
-    this.overlay = buildThickLayout(this.data.proxy);
-    this.overlayThickness = thickness;
-    const material = new THREE.MeshStandardMaterial({
-      color: WORKFLOW_COLORS.proxy,
-      emissive: WORKFLOW_COLORS.proxy,
-      emissiveIntensity: 0.25,
-      roughness: 0.4,
-      transparent: true,
-      opacity,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-    });
-    const mesh = new THREE.Mesh(this.overlay.geometry, material);
-    mesh.renderOrder = 3;
-    this.root.add(mesh);
-  }
-
-  /**
-   * The simulation mesh alone: an opaque teal surface on the particles with its wireframe.
-   * Each layer faces its own side so the coincident layers never fight, and the polygon
-   * offset keeps the wireframe drawn on top.
-   */
-  private addSolidProxy(): void {
-    this.overlay = buildThickLayout(this.data.proxy);
-    this.overlayThickness = 0;
-    this.overlayInset = 0;
-    const material = new THREE.MeshStandardMaterial({
-      color: WORKFLOW_COLORS.proxy,
-      emissive: WORKFLOW_COLORS.proxy,
-      emissiveIntensity: 0.12,
-      roughness: 0.55,
-      polygonOffset: true,
-      polygonOffsetFactor: 1,
-      polygonOffsetUnits: 1,
-    });
-    const mesh = new THREE.Mesh(this.overlay.geometry, material);
-    mesh.name = 'workflow-solid-proxy';
-    this.root.add(mesh);
-    this.addProxyLines(0.7, WORKFLOW_COLORS.proxyWire);
-  }
-
-  private addProxyLines(opacity: number, color = WORKFLOW_COLORS.proxy): void {
-    const geometry = new THREE.BufferGeometry();
-    this.proxyLines = new THREE.BufferAttribute(new Float32Array(this.data.proxy.stretchPairs.length * 3), 3);
-    geometry.setAttribute('position', this.proxyLines);
-    const lines = new THREE.LineSegments(geometry, new THREE.LineBasicMaterial({ color, transparent: true, opacity }));
-    lines.renderOrder = 5;
-    this.root.add(lines);
+    if (this.state.section) this.thickFill = this.addFill(this.thick, rim.color.getHex());
   }
 
   private addMapping(): void {

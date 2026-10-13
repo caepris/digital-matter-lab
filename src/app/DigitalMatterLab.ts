@@ -61,6 +61,7 @@ export interface LabTestHook {
     setState(patch: Partial<CreatorWorkflowState>): void;
     cameraPositions(): number[][];
     cameraTargets(): number[][];
+    sectionPositions(): (number | null)[];
     setCameraPosition(x: number, y: number, z: number): void;
     resetSimulation(): void;
     simulationStats(): Array<{ vertexCount: number; maxDeformation: number }>;
@@ -246,7 +247,12 @@ export class DigitalMatterLab {
   private activePanels(): Array<MatterPanel | AssemblyWorkspace | ConversionWorkspace | CreatorWorkflowPanel> {
     if (this.activeWorkspace === 'comparison') return this.comparisonPanels;
     if (this.activeWorkspace === 'assembly') return this.assemblyPanels;
-    return this.activeWorkspace === 'conversion' ? this.conversionPanels : this.creatorWorkflow.panels;
+    return this.activeWorkspace === 'conversion' ? this.conversionPanels : this.creatorWorkflow.visiblePanels();
+  }
+
+  /** Panels that keep simulating, including creator paths hidden behind an inspect window. */
+  private steppingPanels(): Array<MatterPanel | AssemblyWorkspace | ConversionWorkspace | CreatorWorkflowPanel> {
+    return this.activeWorkspace === 'creator' ? this.creatorWorkflow.panels : this.activePanels();
   }
 
   private onTabKeyDown = (event: KeyboardEvent): void => {
@@ -273,7 +279,7 @@ export class DigitalMatterLab {
     this.lastTime = time;
 
     const alpha = this.runner.advance(elapsed, (dt) => {
-      for (const panel of this.activePanels()) panel.step(dt);
+      for (const panel of this.steppingPanels()) panel.step(dt);
     });
 
     const size = this.renderer.getSize(new THREE.Vector2());
@@ -366,6 +372,7 @@ export class DigitalMatterLab {
         setState: (patch) => this.creatorWorkflow.setState(patch),
         cameraPositions: () => this.creatorWorkflow.cameraPositions(),
         cameraTargets: () => this.creatorWorkflow.cameraTargets(),
+        sectionPositions: () => this.creatorWorkflow.sectionPositions(),
         setCameraPosition: (x, y, z) => this.creatorWorkflow.setCameraPosition(x, y, z),
         resetSimulation: () => this.creatorWorkflow.resetSimulation(),
         simulationStats: () => this.creatorWorkflow.simulationStats(),

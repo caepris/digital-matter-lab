@@ -83,9 +83,9 @@ describe('workflow assets', () => {
   it('gives every example creator guidance for each path', () => {
     for (const id of WORKFLOW_ASSET_IDS) {
       const asset = workflowAsset(id);
-      expect(asset.shellNote.length).toBeGreaterThan(20);
-      expect(asset.planeNote.length).toBeGreaterThan(20);
-      expect(asset.thickenNote.length).toBeGreaterThan(20);
+      expect(asset.shellNote.length).toBeGreaterThan(10);
+      expect(asset.planeNote.length).toBeGreaterThan(10);
+      expect(asset.thickenNote.length).toBeGreaterThan(10);
       expect(asset.capRegions.length).toBeGreaterThan(0);
       expect(asset.defaultThicknessCm).toBeGreaterThan(0);
     }

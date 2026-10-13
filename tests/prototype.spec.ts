@@ -630,9 +630,52 @@ test('creator workflow hides the render mesh to show the simulation mesh alone',
   expect((await page.evaluate(() => window.__digitalMatterLab!.creator.state())).showRender).toBe(false);
   await workspace.getByTestId('workflow-stage-simulate').click();
   await expect(toggle).not.toBeChecked();
-  await expect(workspace.getByTestId('workflow-mapping')).toBeDisabled();
   await toggle.check();
-  await expect(workspace.getByTestId('workflow-mapping')).toBeEnabled();
+});
+
+test('creator workflow section view cuts every path and moves with its slider', async ({ page }) => {
+  await page.getByRole('tab', { name: 'Creator workflows' }).click();
+  const workspace = page.getByTestId('creator-workflow');
+  await expect(workspace.locator('.workflow-card[aria-busy=true]')).toHaveCount(0);
+  const position = workspace.getByTestId('workflow-section-position');
+  await expect(position).toBeHidden();
+  await workspace.getByTestId('workflow-section').check();
+  await expect(position).toBeVisible();
+  const before = await page.evaluate(() => window.__digitalMatterLab!.creator.sectionPositions());
+  expect(before.every((x) => x !== null)).toBe(true);
+  await position.fill('0.2');
+  const after = await page.evaluate(() => window.__digitalMatterLab!.creator.sectionPositions());
+  expect(after[0]!).toBeLessThan(before[0]!);
+  await workspace.getByTestId('workflow-section').uncheck();
+  expect(await page.evaluate(() => window.__digitalMatterLab!.creator.sectionPositions())).toEqual([null, null, null]);
+});
+
+test('creator workflow inspects one path in a pop-up window', async ({ page }) => {
+  await page.getByRole('tab', { name: 'Creator workflows' }).click();
+  const workspace = page.getByTestId('creator-workflow');
+  await expect(workspace.locator('.workflow-card[aria-busy=true]')).toHaveCount(0);
+  const viewport = workspace.getByTestId('workflow-viewport-plane');
+  const before = (await viewport.boundingBox())!;
+  const inspect = workspace.getByTestId('workflow-inspect-plane');
+  await expect(inspect).toHaveText('Inspect');
+  await inspect.click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toHaveCount(1);
+  await expect(dialog).toHaveAttribute('data-workflow-path', 'plane');
+  await expect(inspect).toHaveText('Close');
+  const after = (await viewport.boundingBox())!;
+  expect(after.width * after.height).toBeGreaterThan(before.width * before.height * 2);
+  const window = page.viewportSize()!;
+  expect(after.x).toBeGreaterThan(0);
+  expect(after.x + after.width).toBeLessThan(window.width);
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(inspect).toHaveText('Inspect');
+
+  await workspace.getByTestId('workflow-inspect-thicken').click();
+  await expect(page.getByRole('dialog')).toHaveAttribute('data-workflow-path', 'thicken');
+  await page.mouse.click(8, 8);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
 });
 
 test('creator workflow step stepper supports keyboard navigation', async ({ page }) => {

@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { describe, expect, it } from 'vitest';
 import { WORKFLOW_ASSET_IDS, buildWorkflowSurface } from '../creator-workflow/workflowAssets';
-import { DEFAULT_WORKFLOW_STATE, WORKFLOW_PATHS, WORKFLOW_STAGES } from '../creator-workflow/workflowTypes';
+import { DEFAULT_WORKFLOW_STATE, WORKFLOW_PATHS, WORKFLOW_STAGES, displayThickness } from '../creator-workflow/workflowTypes';
 import { buildWorkflowPathData, proceduralWorkflowSources } from '../creator-workflow/workflowPipeline';
 import { CreatorWorkflowVisual, buildThickLayout, updateThickLayout } from './CreatorWorkflowVisual';
 
@@ -68,12 +68,81 @@ describe('creator workflow thickening', () => {
         const visual = new CreatorWorkflowVisual(path, { ...DEFAULT_WORKFLOW_STATE, stage, showRender: false }, data);
         const solid = visual.root.getObjectByName('workflow-solid-proxy') as THREE.Mesh;
         expect(solid, `${path} ${stage}`).toBeTruthy();
-        expect((solid.material as THREE.Material).transparent).toBe(false);
+        expect([solid.material].flat().every((material) => !material.transparent)).toBe(true);
         const textured = visual.root.children.filter(
           (child) => child instanceof THREE.Mesh && [child.material].flat().some((m) => (m as THREE.MeshStandardMaterial).map),
         );
         expect(textured, `${path} ${stage} render mesh hidden`).toHaveLength(0);
         visual.dispose();
+      }
+    }
+  });
+
+  it('draws every simulation mesh with visible thickness once it is built', () => {
+    const sources = proceduralWorkflowSources('tshirt', 0.4);
+    for (const path of WORKFLOW_PATHS) {
+      const data = buildWorkflowPathData(DEFAULT_WORKFLOW_STATE, path, sources);
+      for (const showRender of [true, false]) {
+        const state = { ...DEFAULT_WORKFLOW_STATE, stage: 'simulate' as const, showRender, thicknessCm: 2 };
+        const visual = new CreatorWorkflowVisual(path, state, data);
+        const wireframe = visual.root.getObjectByName('workflow-proxy-wire') as THREE.LineSegments;
+        expect(wireframe, `${path} render ${showRender}`).toBeTruthy();
+        const values = wireframe.geometry.getAttribute('position').array as Float32Array;
+        const pairs = data.proxy.stretchPairs.length;
+        let gap = 0;
+        for (let index = 0; index < pairs * 3; index += 1) gap = Math.max(gap, Math.abs(values[index] - values[pairs * 3 + index]));
+        expect(gap, `${path} render ${showRender} faces apart`).toBeGreaterThan(displayThickness(2) * 0.5);
+        visual.dispose();
+      }
+    }
+  });
+
+  it('cuts every layer at the section plane and fills the wall thickness', () => {
+    const sources = proceduralWorkflowSources('fish-flag', 0.4);
+    for (const path of WORKFLOW_PATHS) {
+      const data = buildWorkflowPathData(DEFAULT_WORKFLOW_STATE, path, sources);
+      for (const showRender of [true, false]) {
+        const state = { ...DEFAULT_WORKFLOW_STATE, stage: 'simulate' as const, showRender, section: true };
+        const visual = new CreatorWorkflowVisual(path, state, data);
+        expect(visual.sectionX).not.toBeNull();
+        expect(visual.root.getObjectByName('workflow-section-plane')).toBeTruthy();
+        const fills = visual.root.children.filter((child) => child.name === 'workflow-section-fill') as THREE.Mesh[];
+        expect(fills.length, `${path} render ${showRender} fill`).toBeGreaterThan(0);
+        for (const fill of fills) {
+          expect(fill.geometry.drawRange.count, `${path} fill vertices`).toBeGreaterThan(0);
+          const positions = fill.geometry.getAttribute('position').array as Float32Array;
+          expect(positions[0]).toBeCloseTo(visual.sectionX!, 5);
+        }
+        visual.root.traverse((child) => {
+          if (child.userData.unclipped || !(child instanceof THREE.Mesh || child instanceof THREE.LineSegments)) return;
+          if (child.name === 'workflow-section-plane') return;
+          for (const material of [child.material].flat()) expect(material.clippingPlanes, child.name).toHaveLength(1);
+        });
+        visual.dispose();
+      }
+    }
+  });
+
+  it('shows and hides the simulation mesh overlay with its checkbox after submit', () => {
+    const sources = proceduralWorkflowSources('tshirt', 0.4);
+    for (const path of WORKFLOW_PATHS) {
+      const data = buildWorkflowPathData(DEFAULT_WORKFLOW_STATE, path, sources);
+      for (const stage of ['build', 'simulate'] as const) {
+        for (const showRender of [true, false]) {
+          const names = (showMapping: boolean) => {
+            const visual = new CreatorWorkflowVisual(path, { ...DEFAULT_WORKFLOW_STATE, stage, showRender, showMapping }, data);
+            const found = new Set<string>();
+            visual.root.traverse((child) => found.add(child.name));
+            visual.dispose();
+            return found;
+          };
+          const label = `${path} ${stage} render ${showRender}`;
+          expect(names(true).has('workflow-proxy-wire'), label).toBe(true);
+          const hidden = names(false);
+          expect(hidden.has('workflow-proxy-wire'), label).toBe(false);
+          expect(hidden.has('workflow-proxy-overlay'), label).toBe(false);
+          expect(hidden.has('workflow-solid-proxy'), label).toBe(!showRender);
+        }
       }
     }
   });

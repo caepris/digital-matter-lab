@@ -16,6 +16,10 @@ export interface CreatorWorkflowState {
   showMapping: boolean;
   /** When false, the simulation mesh is drawn as a solid surface in place of the render mesh. */
   showRender: boolean;
+  /** Cuts every viewport at a plane across x to show wall thickness. */
+  section: boolean;
+  /** Section plane position across the model's x extent, 0 to 1. */
+  sectionPosition: number;
   simulationPaused: boolean;
   wind: number;
 }
@@ -27,6 +31,8 @@ export const DEFAULT_WORKFLOW_STATE: CreatorWorkflowState = {
   endCaps: [],
   showMapping: true,
   showRender: true,
+  section: false,
+  sectionPosition: 0.5,
   simulationPaused: true,
   wind: 2.5,
 };
