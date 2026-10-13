@@ -6,6 +6,11 @@ import { AssemblyWorkspace } from './AssemblyWorkspace';
 import type { PanelDefinition } from './MatterPanel';
 import { MatterPanel } from './MatterPanel';
 import { ConversionWorkspace } from './ConversionWorkspace';
+import {
+  CreatorWorkflowWorkspace,
+  type CreatorWorkflowPanel,
+} from './CreatorWorkflowWorkspace';
+import type { CreatorWorkflowState } from '../creator-workflow/workflowTypes';
 
 const PAGE_BACKGROUND = 0x0d0f12;
 
@@ -46,12 +51,26 @@ export interface LabTestHook {
     sectionVisible(): boolean;
     sectionPosition(): number;
     rigidAccessoryCount(): number;
+    accessoryEditing(): boolean;
+    selectedAccessoryPosition(): number[] | null;
     rigidWeldCount(): number;
     maxRigidWeldSeparation(): number;
   };
+  creator: {
+    state(): CreatorWorkflowState;
+    setState(patch: Partial<CreatorWorkflowState>): void;
+    cameraPositions(): number[][];
+    cameraTargets(): number[][];
+    setCameraPosition(x: number, y: number, z: number): void;
+    resetSimulation(): void;
+    simulationStats(): Array<{ vertexCount: number; maxDeformation: number }>;
+    meshSources(): string[];
+    proxyParticleCounts(): number[];
+    capScreenPoint(region: number): { x: number; y: number } | null;
+  };
 }
 
-export type WorkspaceId = 'comparison' | 'assembly' | 'conversion';
+export type WorkspaceId = 'comparison' | 'assembly' | 'conversion' | 'creator';
 
 declare global {
   interface Window {
@@ -67,9 +86,11 @@ export class DigitalMatterLab {
   private readonly comparisonPanels: MatterPanel[];
   private readonly assemblyPanels: AssemblyWorkspace[];
   private readonly conversionPanels: ConversionWorkspace[];
+  private readonly creatorWorkflow: CreatorWorkflowWorkspace;
   private comparisonWorkspace!: HTMLElement;
   private assemblyWorkspace!: HTMLElement;
   private conversionWorkspace!: HTMLElement;
+  private creatorWorkspace!: HTMLElement;
   private readonly tabButtons = new Map<WorkspaceId, HTMLButtonElement>();
   private activeWorkspace: WorkspaceId = 'comparison';
   private readonly runner = new SimulationRunner({ fixedDt: 1 / 60, maxStepsPerFrame: 3 });
@@ -94,6 +115,7 @@ export class DigitalMatterLab {
       .map((definition) => new MatterPanel(definition, this.canvas));
     this.assemblyPanels = [new AssemblyWorkspace(this.canvas, () => this.activeWorkspace === 'assembly')];
     this.conversionPanels = [new ConversionWorkspace(this.canvas, () => this.activeWorkspace === 'conversion')];
+    this.creatorWorkflow = new CreatorWorkflowWorkspace(this.canvas);
     this.panels = [...this.comparisonPanels, ...this.assemblyPanels, ...this.conversionPanels];
 
     root.append(this.canvas, this.createLayout());
@@ -111,6 +133,7 @@ export class DigitalMatterLab {
     window.removeEventListener('resize', this.resize);
     this.router.dispose();
     for (const panel of this.panels) panel.dispose();
+    this.creatorWorkflow.dispose();
     this.renderer.dispose();
   }
 
@@ -123,7 +146,7 @@ export class DigitalMatterLab {
     header.innerHTML = `
       <div>
         <h1>Digital Matter Lab</h1>
-        <p>Compare matter, weld mixed materials, and turn detailed meshes into thin simulation shells.</p>
+        <p>Compare matter, weld materials, convert thin meshes, and evaluate creator-to-runtime workflows.</p>
       </div>`;
 
     const tabs = document.createElement('div');
@@ -134,6 +157,7 @@ export class DigitalMatterLab {
       ['comparison', 'Comparison'],
       ['assembly', 'Assembly'],
       ['conversion', 'Thin conversion'],
+      ['creator', 'Creator workflows'],
     ] as const) {
       const button = document.createElement('button');
       button.type = 'button';
@@ -176,12 +200,23 @@ export class DigitalMatterLab {
     this.conversionWorkspace.setAttribute('aria-labelledby', 'conversion-tab');
     this.conversionWorkspace.hidden = true;
     for (const panel of this.conversionPanels) this.conversionWorkspace.append(panel.element);
-    workspaceHost.append(this.comparisonWorkspace, this.assemblyWorkspace, this.conversionWorkspace);
+
+    this.creatorWorkspace = this.creatorWorkflow.element;
+    this.creatorWorkspace.id = 'creator-workspace';
+    this.creatorWorkspace.setAttribute('role', 'tabpanel');
+    this.creatorWorkspace.setAttribute('aria-labelledby', 'creator-tab');
+    this.creatorWorkspace.hidden = true;
+    workspaceHost.append(
+      this.comparisonWorkspace,
+      this.assemblyWorkspace,
+      this.conversionWorkspace,
+      this.creatorWorkspace,
+    );
 
     const footer = document.createElement('footer');
     footer.className = 'lab-footer';
     footer.textContent =
-      'Comparison: test matter. Assembly: weld materials. Thin conversion: generate a shell proxy, then simulate it.';
+      'Compare matter, assembly, thin conversion, and creator-to-runtime workflows.';
 
     layout.append(header, tabs, workspaceHost, footer);
     return layout;
@@ -195,8 +230,10 @@ export class DigitalMatterLab {
     this.comparisonWorkspace.hidden = workspace !== 'comparison';
     this.assemblyWorkspace.hidden = workspace !== 'assembly';
     this.conversionWorkspace.hidden = workspace !== 'conversion';
+    this.creatorWorkspace.hidden = workspace !== 'creator';
     for (const panel of this.assemblyPanels) panel.setActive(workspace === 'assembly');
     for (const panel of this.conversionPanels) panel.setActive(workspace === 'conversion');
+    this.creatorWorkflow.setActive(workspace === 'creator');
     for (const [id, button] of this.tabButtons) {
       const selected = id === workspace;
       button.setAttribute('aria-selected', String(selected));
@@ -206,15 +243,16 @@ export class DigitalMatterLab {
     this.tabButtons.get(workspace)?.focus();
   }
 
-  private activePanels(): Array<MatterPanel | AssemblyWorkspace | ConversionWorkspace> {
+  private activePanels(): Array<MatterPanel | AssemblyWorkspace | ConversionWorkspace | CreatorWorkflowPanel> {
     if (this.activeWorkspace === 'comparison') return this.comparisonPanels;
-    return this.activeWorkspace === 'assembly' ? this.assemblyPanels : this.conversionPanels;
+    if (this.activeWorkspace === 'assembly') return this.assemblyPanels;
+    return this.activeWorkspace === 'conversion' ? this.conversionPanels : this.creatorWorkflow.panels;
   }
 
   private onTabKeyDown = (event: KeyboardEvent): void => {
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
     event.preventDefault();
-    const workspaces: WorkspaceId[] = ['comparison', 'assembly', 'conversion'];
+    const workspaces: WorkspaceId[] = ['comparison', 'assembly', 'conversion', 'creator'];
     const current = workspaces.indexOf(this.activeWorkspace);
     const next =
       event.key === 'Home'
@@ -318,8 +356,22 @@ export class DigitalMatterLab {
         sectionVisible: () => this.conversionPanels[0].sectionVisible,
         sectionPosition: () => this.conversionPanels[0].sectionPosition,
         rigidAccessoryCount: () => this.conversionPanels[0].rigidAccessoryCount,
+        accessoryEditing: () => this.conversionPanels[0].accessoryEditing,
+        selectedAccessoryPosition: () => this.conversionPanels[0].selectedAccessoryPosition,
         rigidWeldCount: () => this.conversionPanels[0].rigidWeldCount,
         maxRigidWeldSeparation: () => this.conversionPanels[0].maxRigidWeldSeparation,
+      },
+      creator: {
+        state: () => ({ ...this.creatorWorkflow.state }),
+        setState: (patch) => this.creatorWorkflow.setState(patch),
+        cameraPositions: () => this.creatorWorkflow.cameraPositions(),
+        cameraTargets: () => this.creatorWorkflow.cameraTargets(),
+        setCameraPosition: (x, y, z) => this.creatorWorkflow.setCameraPosition(x, y, z),
+        resetSimulation: () => this.creatorWorkflow.resetSimulation(),
+        simulationStats: () => this.creatorWorkflow.simulationStats(),
+        meshSources: () => this.creatorWorkflow.meshSources(),
+        proxyParticleCounts: () => this.creatorWorkflow.proxyParticleCounts(),
+        capScreenPoint: (region) => this.creatorWorkflow.capScreenPoint(region),
       },
     };
   }

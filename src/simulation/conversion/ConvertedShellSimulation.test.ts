@@ -34,6 +34,19 @@ describe('ConvertedShellSimulation', () => {
     expect(simulation.thickness).toBe(0.002);
   });
 
+  it('applies optional wind acceleration without moving pinned particles', () => {
+    const calm = new ConvertedShellSimulation({ mesh: surface, thickness: 0.02, pinned: [0] });
+    const windy = new ConvertedShellSimulation({ mesh: surface, thickness: 0.02, pinned: [0] });
+    const pinnedStart = windy.positions[0];
+    windy.setExternalAcceleration(5, 0, 0);
+    for (let index = 0; index < 30; index += 1) {
+      calm.step(1 / 60);
+      windy.step(1 / 60);
+    }
+    expect(windy.stats().center[0]).toBeGreaterThan(calm.stats().center[0]);
+    expect(windy.positions[0]).toBe(pinnedStart);
+  });
+
   it('makes a thicker shell harder to bend', () => {
     const thin = bendingComplianceForThickness(0.01, 0.01);
     const thick = bendingComplianceForThickness(0.01, 0.04);

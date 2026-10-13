@@ -80,8 +80,13 @@ export abstract class XpbdSimulation<P extends XpbdPreset> implements MatterSimu
   private readonly surfaceTriangles: Uint32Array;
   private spheres: SphereBody[] = [];
   private grab: Grab | null = null;
+  private readonly externalAcceleration = new THREE.Vector3();
   /** Force the body exerted back on the press during the last step, in newtons. */
   private pressForce = 0;
+  /** Simulated seconds since the last reset, for time-varying forces such as gusts. */
+  protected time = 0;
+  /** Pose that `reset` restores instead of the rest shape, e.g. a settled drape. */
+  private startPose: Float32Array | null = null;
 
   protected constructor(options: XpbdBodyOptions<P>) {
     this.options = options;
@@ -140,6 +145,15 @@ export abstract class XpbdSimulation<P extends XpbdPreset> implements MatterSimu
   /** Optional hook for body-specific collisions such as self-collision. */
   protected solveExtraCollisions(_h: number): void {}
 
+  /** Optional hook that adds forces to `velocities` at the start of each substep, e.g. wind. */
+  protected applyForces(_h: number): void {}
+
+  /** Makes `reset` return to the current pose, e.g. after letting a garment settle. */
+  captureStartPose(): void {
+    this.startPose = this.positions.slice();
+    this.reset();
+  }
+
   /** Updates contact geometry without resetting the current simulation state. */
   protected setCollisionThickness(particleRadius: number, pressFloor: number): void {
     this.options.particleRadius = particleRadius;
@@ -156,9 +170,19 @@ export abstract class XpbdSimulation<P extends XpbdPreset> implements MatterSimu
     this.reset();
   }
 
+  /** Applies a uniform acceleration to movable particles, in addition to gravity. */
+  setExternalAcceleration(x: number, y: number, z: number): void {
+    this.externalAcceleration.set(x, y, z);
+  }
+
   reset(): void {
-    this.positions.set(this.restPositions);
-    this.applyStartJitter();
+    if (this.startPose) {
+      this.positions.set(this.startPose);
+    } else {
+      this.positions.set(this.restPositions);
+      this.applyStartJitter();
+    }
+    this.time = 0;
     this.previous.set(this.positions);
     this.framePrevious.set(this.positions);
     this.velocities.fill(0);
@@ -179,7 +203,7 @@ export abstract class XpbdSimulation<P extends XpbdPreset> implements MatterSimu
 
     const substeps = this.preset.substeps;
     const h = dt / substeps;
-    const { positions, previous, velocities, invMass, count } = this;
+    const { positions, previous, velocities, invMass, count, externalAcceleration } = this;
     const radius = this.options.particleRadius;
     const friction = this.preset.friction;
     const damping = Math.max(0, 1 - this.preset.damping * h);
@@ -191,10 +215,15 @@ export abstract class XpbdSimulation<P extends XpbdPreset> implements MatterSimu
         this.press.previousBottom + (this.press.bottom - this.press.previousBottom) * ((s + 1) / substeps);
       const pressEngaged = !pressIsParked(pressBottom);
 
+      this.applyForces(h);
+      this.time += h;
       for (let i = 0; i < count; i++) {
         if (invMass[i] === 0) continue;
         const o = i * 3;
+        velocities[o] += externalAcceleration.x * h;
         velocities[o + 1] += GRAVITY * h;
+        velocities[o + 1] += externalAcceleration.y * h;
+        velocities[o + 2] += externalAcceleration.z * h;
         previous[o] = positions[o];
         previous[o + 1] = positions[o + 1];
         previous[o + 2] = positions[o + 2];

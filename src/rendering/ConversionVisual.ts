@@ -57,6 +57,10 @@ export class ConversionVisual {
     this.body.syncRigidWelds(parts, source, selectedId, editing);
   }
 
+  syncPlacementPreview(part: RigidWeldPart | null): void {
+    this.body.syncPlacementPreview(part);
+  }
+
   rigidWeldProxy(id: string): THREE.Mesh | undefined {
     return this.body.rigidWeldProxy(id);
   }
@@ -128,6 +132,7 @@ class ConversionBodyVisual implements BodyVisual {
   private readonly rigidWelds = new THREE.Group();
   private readonly weldMarkers = new THREE.Group();
   private readonly rigidWeldMeshes = new Map<string, THREE.Mesh>();
+  private placementPreview: THREE.Mesh | null = null;
   private rigidWeldParts: readonly RigidWeldPart[] = [];
   private accessoryEditing = true;
   private readonly clippingPlane = new THREE.Plane(new THREE.Vector3(-1, 0, 0), 0);
@@ -291,7 +296,7 @@ class ConversionBodyVisual implements BodyVisual {
             color: part.valid ? preset.color : 0xe45b64,
             roughness: 0.32,
             metalness: 0.72,
-            emissive: part.id === selectedId ? 0x1c5b4e : 0x000000,
+            emissive: editing && part.id === selectedId ? 0x1c5b4e : 0x000000,
             emissiveIntensity: 0.7,
           }),
         );
@@ -301,24 +306,79 @@ class ConversionBodyVisual implements BodyVisual {
         this.rigidWelds.add(mesh);
         this.rigidWeldMeshes.set(part.id, mesh);
       }
+      const preset = rigidAccessory(part.presetId as RigidAccessoryId);
+      if (editing) {
+        const positions = mesh.geometry.getAttribute('position') as THREE.BufferAttribute;
+        (positions.array as Float32Array).set(preset.positions);
+        positions.needsUpdate = true;
+        mesh.geometry.computeVertexNormals();
+      }
       mesh.matrix.copy(matrixForRigidWeld(part));
       mesh.matrix.decompose(mesh.position, mesh.quaternion, mesh.scale);
       const material = mesh.material as THREE.MeshStandardMaterial;
-      const preset = rigidAccessory(part.presetId as RigidAccessoryId);
       material.color.setHex(part.valid ? preset.color : 0xe45b64);
-      material.emissive.setHex(part.id === selectedId ? 0x1c5b4e : 0x000000);
+      material.emissive.setHex(editing && part.id === selectedId ? 0x1c5b4e : 0x000000);
     }
-    this.weldMarkers.clear();
+    disposeMeshChildren(this.weldMarkers);
     const markerGeometry = new THREE.SphereGeometry(0.012, 8, 6);
-    const markerMaterial = new THREE.MeshBasicMaterial({ color: 0xffcf5a });
-    for (const part of parts) {
+    const selected = parts.find((part) => part.id === selectedId);
+    if (selected) {
+      const markerMaterial = new THREE.MeshBasicMaterial({ color: selected.valid ? 0x65e6bc : 0xe45b64 });
+      const part = selected;
       for (const weld of part.welds) {
         const marker = new THREE.Mesh(markerGeometry, markerMaterial);
         marker.position.copy(pointForAnchor(weld.sourceAnchor, source.positions, source.triangles));
         this.weldMarkers.add(marker);
       }
+      if (part.welds.length === 0) {
+        markerGeometry.dispose();
+        markerMaterial.dispose();
+      }
+    } else {
+      markerGeometry.dispose();
     }
-    this.weldMarkers.visible = editing;
+    this.weldMarkers.visible = editing && selected !== undefined;
+  }
+
+  syncPlacementPreview(part: RigidWeldPart | null): void {
+    if (!part) {
+      if (this.placementPreview) {
+        this.placementPreview.removeFromParent();
+        this.placementPreview.geometry.dispose();
+        (this.placementPreview.material as THREE.Material).dispose();
+        this.placementPreview = null;
+      }
+      return;
+    }
+    const preset = rigidAccessory(part.presetId as RigidAccessoryId);
+    if (!this.placementPreview || this.placementPreview.userData.presetId !== part.presetId) {
+      this.syncPlacementPreview(null);
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.BufferAttribute(preset.positions.slice(), 3));
+      geometry.setIndex(new THREE.BufferAttribute(preset.triangles, 1));
+      geometry.computeVertexNormals();
+      this.placementPreview = new THREE.Mesh(
+        geometry,
+        new THREE.MeshStandardMaterial({
+          color: part.valid ? 0x65e6bc : 0xe45b64,
+          emissive: part.valid ? 0x163e35 : 0x4a171b,
+          transparent: true,
+          opacity: 0.68,
+          roughness: 0.4,
+          metalness: 0.35,
+        }),
+      );
+      this.placementPreview.userData.presetId = part.presetId;
+      this.object.add(this.placementPreview);
+    }
+    this.placementPreview.matrix.copy(matrixForRigidWeld(part));
+    this.placementPreview.matrix.decompose(
+      this.placementPreview.position,
+      this.placementPreview.quaternion,
+      this.placementPreview.scale,
+    );
+    const material = this.placementPreview.material as THREE.MeshStandardMaterial;
+    material.color.setHex(part.valid ? 0x65e6bc : 0xe45b64);
   }
 
   rigidWeldProxy(id: string): THREE.Mesh | undefined {
@@ -605,6 +665,7 @@ class ConversionBodyVisual implements BodyVisual {
   }
 
   private clear(): void {
+    this.syncPlacementPreview(null);
     this.object.clear();
     const stencils = [this.sourceCapStencil, this.shellCapStencil];
     for (const group of [this.supports, this.sectionGizmo, ...stencils]) {
@@ -644,14 +705,24 @@ class ConversionBodyVisual implements BodyVisual {
     }
     this.rigidWeldMeshes.clear();
     this.rigidWelds.clear();
-    for (const child of this.weldMarkers.children) {
-      const marker = child as THREE.Mesh;
-      marker.geometry.dispose();
-      (marker.material as THREE.Material).dispose();
-    }
-    this.weldMarkers.clear();
+    disposeMeshChildren(this.weldMarkers);
     this.rigidWeldParts = [];
   }
+}
+
+function disposeMeshChildren(group: THREE.Group): void {
+  const materials = new Set<THREE.Material>();
+  const geometries = new Set<THREE.BufferGeometry>();
+  for (const child of group.children) {
+    const mesh = child as THREE.Mesh;
+    if (mesh.geometry) geometries.add(mesh.geometry);
+    const material = mesh.material;
+    if (Array.isArray(material)) material.forEach((entry) => materials.add(entry));
+    else if (material) materials.add(material);
+  }
+  geometries.forEach((geometry) => geometry.dispose());
+  materials.forEach((material) => material.dispose());
+  group.clear();
 }
 
 function supportMesh(support: SourceMesh['supports'][number], material: THREE.Material): THREE.Mesh {

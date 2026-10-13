@@ -26,6 +26,38 @@ source mesh follow that shell while Grab, Drop, and Press act on the simulation 
 Structure switches between source vertices and generated shell particles based on the
 current stage.
 
+The **Creator workflows** tab follows one arbitrary mesh through three authoring paths in
+three steps: **Creator submits**, **Engine builds simulation mesh**, and **Simulate**.
+
+1. **Engine-generated shell.** The creator submits a closed arbitrary mesh and clicks any
+   capped openings (or uses the chips) to mark them as end caps. The engine generates a thin
+   teal shell around every non-cap face; marked caps still render but do not simulate. With
+   no caps marked, the full mesh simulates.
+2. **Creator simulation plane.** The creator also submits one thin plane that intersects the
+   mesh. Every render vertex binds to the plane, and only the plane simulates.
+3. **Engine thickening.** The creator submits a separately authored zero-thickness open
+   surface (no caps, no rolled collar, nothing tucked inside the body). The engine adds
+   outward thickness, reuses the UVs with a tint for the inside, and textures the rim from
+   the boundary UVs.
+
+`python3 scripts/generate-workflow-models.py` writes each example twice: `{id}.glb`, the
+capped arbitrary mesh with UVs and a `_CAPREGION` vertex attribute, and `{id}-open.glb`,
+the Path 3 surface. Matching procedural fallbacks live in
+`src/creator-workflow/workflowAssets.ts`.
+
+All three paths run independent XPBD cloth with per-example materials
+(`src/creator-workflow/workflowPhysics.ts`): dihedral-angle bending, per-face aerodynamic
+wind with gusts, and a faint grey collision body (a mannequin, hips and legs, or a pole)
+for Paths 1 and 3. Path 2's plane runs through the body, so it has none. Fabric resists
+stretching but compresses almost freely, the way real cloth buckles into fine wrinkles, so
+a closed Path 1 shell collapses like an empty bag instead of holding its volume. Air only
+inflates the windsock once its mouth is open (Path 3, or Path 1 with the mouth marked as an
+end cap). Garments hang from the neckline and sleeves and hoods are sewn on. Simulate shows
+a settled drape, and Reset returns to it. Drag the cloth to grab it and drag empty space to
+orbit. Two-finger scroll or shift-drag pans, pinch zooms, and **Reset view** restores the
+camera. Uncheck **Show render mesh** to see only the simulation mesh, drawn as a solid teal
+surface with its wireframe.
+
 The editor's numbered sidebar guides the workflow: configure and place a part, select it
 from the viewport or part list, transform it, then join touching parts. Position, rotation,
 scale, material, duplicate, delete, snapping, history, and structure controls remain
@@ -64,7 +96,7 @@ Each panel is independent and has its own controls:
 - **Structure**: reveal how the body is built (collider frame and axes, tetrahedral lattice, or cloth mesh).
 - **Reset**: restore that panel, including any permanent plastic deformation.
 
-Use the **Comparison**, **Assembly**, and **Thin conversion** tabs to switch workspaces.
+Use the **Comparison**, **Assembly**, **Thin conversion**, and **Creator workflows** tabs to switch workspaces.
 Hidden simulations are paused. In Assembly, switch to **Simulate**, then press **Play** for Grab, Drop, and Press.
 Pause to inspect the result; Restart restores the authored assembly and pauses again. Camera
 orbit, pan, and zoom remain available while simulating. **Structure**
@@ -79,6 +111,7 @@ works in both Edit and Simulate: it fades the parts and draws every simulated ve
 - `src/assembly-editor`: authored assembly documents, undo history, and weld brushing.
 - `src/simulation/assembly`: part meshes, compilation, and the mixed-material solver.
 - `src/simulation/conversion`: procedural source meshes, surface reduction/binding, and the arbitrary thin-shell solver.
+- `src/creator-workflow`: authored-model loading, procedural fallbacks, path processing, and runtime workflow data.
 - `src/materials/presets.ts`: all tunable material parameters.
 - `src/rendering`: per-panel scenes, body visuals, and structure overlays, drawn as scissored viewports of one WebGL canvas.
 - `src/interaction`, `src/ui`, `src/app`: pointer routing, panel controls, and app wiring.

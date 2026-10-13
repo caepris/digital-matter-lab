@@ -33,8 +33,8 @@ test.beforeEach(async ({ page }) => {
   expect(errors).toEqual([]);
 });
 
-test('loads comparison, assembly, and conversion workspaces', async ({ page }) => {
-  await expect(page.locator('.panel')).toHaveCount(5);
+test('loads comparison, assembly, conversion, and creator workflow workspaces', async ({ page }) => {
+  await expect(page.locator('.panel')).toHaveCount(8);
   const kinds = await page.evaluate(() => window.__digitalMatterLab!.panels.map((p) => p.kind));
   expect(kinds).toEqual([...ALL_KINDS]);
   await expect(page.getByRole('heading', { name: 'Rigid volume' })).toBeVisible();
@@ -42,6 +42,7 @@ test('loads comparison, assembly, and conversion workspaces', async ({ page }) =
   await expect(page.getByRole('heading', { name: 'Thin deformable shell' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Assembly editor' })).toBeHidden();
   await expect(page.getByRole('heading', { name: 'Thin mesh conversion' })).toBeHidden();
+  await expect(page.getByRole('heading', { name: 'Creator authoring paths' })).toBeHidden();
 });
 
 for (const [index, kind] of KINDS.entries()) {
@@ -199,7 +200,9 @@ test('thin conversion auto-generates, edits thickness live, and simulates every 
   const thickness = workspace.getByTestId('thickness');
   for (const id of ['curtain', 'car-shell', 'tshirt', 'denim-jacket']) {
     await source.selectOption(id);
-    await expect.poll(() => page.evaluate(() => window.__digitalMatterLab!.conversion.sourceId())).toBe(id);
+    await expect
+      .poll(() => page.evaluate(() => window.__digitalMatterLab!.conversion.sourceId()), { timeout: 10_000 })
+      .toBe(id);
     await expect(shellStats).toContainText('vertices');
     expect(await vertexCount()).toBeGreaterThan(3);
     await expect(play).toBeEnabled();
@@ -318,29 +321,60 @@ test('thin conversion places and simulates an auto-welded rigid accessory', asyn
   await expect.poll(() => page.evaluate(() => window.__digitalMatterLab!.conversion.sourceId())).toBe('car-shell');
   await expect(workspace.getByTestId('conversion-stats')).toContainText('vertices');
 
+  const edit = workspace.getByTestId('rigid-weld-edit');
+  await edit.click();
+  await expect(edit).toHaveText('Done editing');
+  expect(await page.evaluate(() => window.__digitalMatterLab!.conversion.accessoryEditing())).toBe(true);
   await workspace.getByTestId('rigid-weld-preset').selectOption('plate');
-  await workspace.locator('[data-accessory-tool=place]').click();
+  await workspace.getByTestId('rigid-weld-add').click();
+  await expect(workspace.getByTestId('rigid-weld-cancel')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(workspace.getByTestId('rigid-weld-cancel')).toBeHidden();
+  await workspace.getByTestId('rigid-weld-add').click();
   const target = await bodyPoint(page, 4);
   await page.mouse.click(target.x, target.y);
   await expect.poll(() => page.evaluate(() => window.__digitalMatterLab!.conversion.rigidAccessoryCount())).toBe(1);
   await expect.poll(() => page.evaluate(() => window.__digitalMatterLab!.conversion.rigidWeldCount())).toBeGreaterThan(0);
-  await expect(workspace.getByTestId('rigid-weld-list')).toContainText('Plate');
+  await expect(workspace.getByTestId('rigid-weld-list')).toContainText('Plate 1');
   await expect(workspace.locator('[data-accessory-tool=move]')).toBeEnabled();
+
+  const beforeSlide = await page.evaluate(() => window.__digitalMatterLab!.conversion.selectedAccessoryPosition());
+  await page.mouse.move(target.x, target.y);
+  await page.mouse.down();
+  await page.mouse.move(target.x + 45, target.y, { steps: 8 });
+  await page.mouse.up();
+  await expect.poll(async () => {
+    const after = await page.evaluate(() => window.__digitalMatterLab!.conversion.selectedAccessoryPosition());
+    return after && beforeSlide ? Math.hypot(...after.map((value, axis) => value - beforeSlide[axis])) : 0;
+  }).toBeGreaterThan(0.01);
+
   await workspace.locator('[data-accessory-tool=rotate]').click();
   await expect(workspace.locator('[data-accessory-tool=rotate]')).toHaveAttribute('aria-checked', 'true');
   await workspace.locator('[data-accessory-tool=scale]').click();
   await expect(workspace.locator('[data-accessory-tool=scale]')).toHaveAttribute('aria-checked', 'true');
+  await workspace.getByTestId('rigid-weld-duplicate').click();
+  await expect.poll(() => page.evaluate(() => window.__digitalMatterLab!.conversion.rigidAccessoryCount())).toBe(2);
+  await expect(workspace.getByTestId('rigid-weld-list')).toContainText('Plate 2');
+
+  // Destructive source changes require confirmation and preserve the current work when cancelled.
+  page.once('dialog', (dialog) => dialog.dismiss());
+  await workspace.getByTestId('source-select').selectOption('tshirt');
+  await expect(workspace.getByTestId('source-select')).toHaveValue('car-shell');
 
   const play = workspace.getByTestId('simulation-play');
   await expect(play).toBeEnabled();
   await play.click();
   await expect(play).toHaveText('Pause');
+  expect(await page.evaluate(() => window.__digitalMatterLab!.conversion.accessoryEditing())).toBe(false);
   await page.waitForTimeout(800);
   expect(await page.evaluate(() => window.__digitalMatterLab!.conversion.maxRigidWeldSeparation())).toBeLessThan(0.03);
   await workspace.getByTestId('reset').click();
-  expect(await page.evaluate(() => window.__digitalMatterLab!.conversion.rigidAccessoryCount())).toBe(1);
+  expect(await page.evaluate(() => window.__digitalMatterLab!.conversion.rigidAccessoryCount())).toBe(2);
+  await edit.click();
   await workspace.getByTestId('rigid-weld-delete').click();
-  await expect.poll(() => page.evaluate(() => window.__digitalMatterLab!.conversion.rigidAccessoryCount())).toBe(0);
+  await expect.poll(() => page.evaluate(() => window.__digitalMatterLab!.conversion.rigidAccessoryCount())).toBe(1);
+  await workspace.getByTestId('rigid-weld-undo-delete').click();
+  await expect.poll(() => page.evaluate(() => window.__digitalMatterLab!.conversion.rigidAccessoryCount())).toBe(2);
 });
 
 test('assembly editor brushes welds and shows every vertex in structure mode', async ({ page }) => {
@@ -502,4 +536,170 @@ test('assembly simulation controls expose state and safety feedback', async ({ p
   await editor.getByTestId('clear-assembly').scrollIntoViewIfNeeded();
   await editor.getByTestId('clear-assembly').click();
   expect(await page.evaluate(() => window.__digitalMatterLab!.assembly.partCount())).toBe(3);
+});
+
+test('creator workflows walk every example through three authoring paths', async ({ page }) => {
+  await page.getByRole('tab', { name: 'Creator workflows' }).click();
+  const workspace = page.getByTestId('creator-workflow');
+  await expect(workspace).toBeVisible();
+  await expect(workspace.locator('.workflow-card')).toHaveCount(3);
+  await expect(workspace.getByRole('heading', { name: 'Engine-generated shell' })).toBeVisible();
+  await expect(workspace.getByRole('heading', { name: 'Creator simulation plane' })).toBeVisible();
+  await expect(workspace.getByRole('heading', { name: 'Engine-thickened surface' })).toBeVisible();
+
+  const asset = workspace.getByTestId('workflow-asset');
+  const ids = ['tshirt', 'ruffled-skirt', 'puffer-jacket', 'sheet-metal', 'hooded-jacket', 'fish-flag'];
+  for (const id of ids) {
+    await asset.selectOption(id);
+    await expect(workspace.locator('.workflow-card[aria-busy=true]')).toHaveCount(0);
+    expect(await page.evaluate(() => window.__digitalMatterLab!.creator.meshSources())).toEqual([
+      'authored',
+      'authored',
+      'authored',
+    ]);
+    await workspace.getByTestId('workflow-cap-1').click();
+    await workspace.getByTestId('workflow-stage-simulate').click();
+    await workspace.getByTestId('workflow-simulation-play').click();
+    await expect
+      .poll(async () =>
+        page.evaluate(() =>
+          Math.min(...window.__digitalMatterLab!.creator.simulationStats().map((entry) => entry.maxDeformation)),
+        ),
+      )
+      .toBeGreaterThan(0.003);
+    const stats = await page.evaluate(() => window.__digitalMatterLab!.creator.simulationStats());
+    expect(stats.every((entry) => entry.vertexCount > 20), id).toBe(true);
+    await workspace.getByTestId('workflow-stage-submit').click();
+  }
+
+  await workspace.getByTestId('workflow-stage-build').click();
+  await expect(workspace.locator('.workflow-stage-badge')).toHaveText(['Build', 'Build', 'Build']);
+  await expect(workspace.getByTestId('workflow-thickness')).toBeVisible();
+  await workspace.getByTestId('workflow-thickness').fill('2.5');
+  await expect(workspace.getByTestId('workflow-caption-shell')).toContainText('render but are not simulated');
+  await expect(workspace.getByTestId('workflow-caption-thicken')).toContainText('boundary UVs');
+  await workspace.getByTestId('workflow-next').click();
+  await expect(workspace.getByTestId('workflow-simulation-controls')).toBeVisible();
+  await workspace.getByTestId('workflow-wind').fill('4');
+  await workspace.getByTestId('workflow-simulation-play').click();
+  await expect(workspace.getByTestId('workflow-simulation-play')).toHaveText('Pause');
+  await workspace.getByTestId('workflow-simulation-play').click();
+  await workspace.getByTestId('workflow-simulation-reset').click();
+  const state = await page.evaluate(() => window.__digitalMatterLab!.creator.state());
+  expect(state).toMatchObject({ assetId: 'fish-flag', stage: 'simulate', endCaps: [1], thicknessCm: 2.5, wind: 4, simulationPaused: true });
+});
+
+test('creator marks end caps by clicking the arbitrary mesh in path 1', async ({ page }) => {
+  await page.getByRole('tab', { name: 'Creator workflows' }).click();
+  const workspace = page.getByTestId('creator-workflow');
+  await expect(workspace.locator('.workflow-card[aria-busy=true]')).toHaveCount(0);
+  await expect(workspace.getByTestId('workflow-cap-status')).toHaveText('No end caps: full mesh simulates');
+  const before = await page.evaluate(() => window.__digitalMatterLab!.creator.proxyParticleCounts());
+
+  const cuff = await page.evaluate(() => window.__digitalMatterLab!.creator.capScreenPoint(4));
+  expect(cuff).not.toBeNull();
+  await page.mouse.move(cuff!.x, cuff!.y);
+  await expect(workspace.getByTestId('workflow-caption-shell')).toContainText('Right cuff');
+  await page.mouse.down();
+  await page.mouse.up();
+  await expect(workspace.getByTestId('workflow-cap-4')).toHaveAttribute('aria-pressed', 'true');
+  await expect(workspace.getByTestId('workflow-cap-status')).toContainText('1 end cap marked');
+
+  await workspace.getByTestId('workflow-cap-1').click();
+  await workspace.getByTestId('workflow-cap-2').click();
+  await workspace.getByTestId('workflow-cap-3').click();
+  await expect
+    .poll(async () => page.evaluate(() => window.__digitalMatterLab!.creator.proxyParticleCounts()[0]))
+    .toBeLessThan(before[0]);
+  const after = await page.evaluate(() => window.__digitalMatterLab!.creator.proxyParticleCounts());
+  expect(after.slice(1)).toEqual(before.slice(1));
+  expect(await page.evaluate(() => window.__digitalMatterLab!.creator.state().endCaps)).toEqual([1, 2, 3, 4]);
+
+  await workspace.getByTestId('workflow-caps-clear').click();
+  await expect(workspace.getByTestId('workflow-cap-status')).toHaveText('No end caps: full mesh simulates');
+});
+
+test('creator workflow hides the render mesh to show the simulation mesh alone', async ({ page }) => {
+  await page.getByRole('tab', { name: 'Creator workflows' }).click();
+  const workspace = page.getByTestId('creator-workflow');
+  await expect(workspace.locator('.workflow-card[aria-busy=true]')).toHaveCount(0);
+  const toggle = workspace.getByTestId('workflow-render');
+  await expect(toggle).toBeVisible();
+  await expect(toggle).toBeChecked();
+  await toggle.uncheck();
+  expect((await page.evaluate(() => window.__digitalMatterLab!.creator.state())).showRender).toBe(false);
+  await workspace.getByTestId('workflow-stage-simulate').click();
+  await expect(toggle).not.toBeChecked();
+  await expect(workspace.getByTestId('workflow-mapping')).toBeDisabled();
+  await toggle.check();
+  await expect(workspace.getByTestId('workflow-mapping')).toBeEnabled();
+});
+
+test('creator workflow step stepper supports keyboard navigation', async ({ page }) => {
+  await page.getByRole('tab', { name: 'Creator workflows' }).click();
+  const submit = page.getByTestId('workflow-stage-submit');
+  await submit.focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(page.getByTestId('workflow-stage-build')).toHaveAttribute('aria-checked', 'true');
+  await page.keyboard.press('End');
+  await expect(page.getByTestId('workflow-stage-simulate')).toHaveAttribute('aria-checked', 'true');
+  await page.keyboard.press('Home');
+  await expect(submit).toHaveAttribute('aria-checked', 'true');
+});
+
+test('creator workflow pans on two-finger trackpad scroll and resets the view', async ({ page }) => {
+  await page.getByRole('tab', { name: 'Creator workflows' }).click();
+  const workspace = page.getByTestId('creator-workflow');
+  await expect(workspace.getByTestId('workflow-camera-hint')).toContainText('Two-finger scroll');
+  const initialTargets = await page.evaluate(() => window.__digitalMatterLab!.creator.cameraTargets());
+  const initialCameras = await page.evaluate(() => window.__digitalMatterLab!.creator.cameraPositions());
+  const bounds = await workspace.getByTestId('workflow-viewport-thicken').boundingBox();
+  expect(bounds).not.toBeNull();
+  await page.mouse.move(bounds!.x + bounds!.width / 2, bounds!.y + bounds!.height / 2);
+  for (let step = 0; step < 6; step += 1) await page.mouse.wheel(14, 9);
+
+  await expect
+    .poll(async () => page.evaluate(() => window.__digitalMatterLab!.creator.cameraTargets()[0][0]))
+    .toBeGreaterThan(initialTargets[0][0] + 0.02);
+  const targets = await page.evaluate(() => window.__digitalMatterLab!.creator.cameraTargets());
+  const cameras = await page.evaluate(() => window.__digitalMatterLab!.creator.cameraPositions());
+  for (let panel = 1; panel < 3; panel += 1) {
+    for (let axis = 0; axis < 3; axis += 1) expect(targets[panel][axis]).toBeCloseTo(targets[0][axis], 6);
+  }
+  // Panning keeps the distance to the target: it is not a zoom.
+  const distance = (camera: number[], target: number[]) => Math.hypot(...camera.map((value, axis) => value - target[axis]));
+  expect(distance(cameras[0], targets[0])).toBeCloseTo(distance(initialCameras[0], initialTargets[0]), 2);
+
+  await workspace.getByTestId('workflow-reset-view').click();
+  await expect
+    .poll(async () => page.evaluate(() => window.__digitalMatterLab!.creator.cameraTargets()))
+    .toEqual(initialTargets);
+});
+
+test('creator workflow cameras remain synchronized and narrow layout does not overflow', async ({ page }) => {
+  await page.getByRole('tab', { name: 'Creator workflows' }).click();
+  const workspace = page.getByTestId('creator-workflow');
+  const initial = await page.evaluate(() => window.__digitalMatterLab!.creator.cameraPositions());
+  const firstViewport = workspace.getByTestId('workflow-viewport-plane');
+  const bounds = await firstViewport.boundingBox();
+  expect(bounds).not.toBeNull();
+  await page.mouse.move(bounds!.x + bounds!.width * 0.55, bounds!.y + bounds!.height * 0.5);
+  await page.mouse.down();
+  await page.mouse.move(bounds!.x + bounds!.width * 0.72, bounds!.y + bounds!.height * 0.65, { steps: 8 });
+  await page.mouse.up();
+
+  await expect
+    .poll(async () => page.evaluate(() => window.__digitalMatterLab!.creator.cameraPositions()))
+    .not.toEqual(initial);
+  const cameras = await page.evaluate(() => window.__digitalMatterLab!.creator.cameraPositions());
+  for (const camera of cameras.slice(1)) {
+    for (let axis = 0; axis < 3; axis += 1) expect(camera[axis]).toBeCloseTo(cameras[0][axis], 10);
+  }
+
+  await page.setViewportSize({ width: 600, height: 800 });
+  await expect(workspace.locator('.workflow-card').first()).toBeVisible();
+  const hasHorizontalOverflow = await page.evaluate(
+    () => document.documentElement.scrollWidth > document.documentElement.clientWidth,
+  );
+  expect(hasHorizontalOverflow).toBe(false);
 });

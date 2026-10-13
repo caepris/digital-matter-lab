@@ -1,5 +1,10 @@
 import * as THREE from 'three';
-import { InteractionRouter, type InteractionTarget, type ViewportRect } from '../interaction/InteractionRouter';
+import {
+  InteractionRouter,
+  rayFromViewport,
+  type InteractionTarget,
+  type ViewportRect,
+} from '../interaction/InteractionRouter';
 import { ConversionVisual } from '../rendering/ConversionVisual';
 import { createAssemblyGizmos, type AssemblyGizmos } from '../rendering/assemblyGizmos';
 import { convertSurface, type ConvertedSurface } from '../simulation/conversion/convertSurface';
@@ -15,6 +20,7 @@ import { clampToPlatform, DROP_TARGET_PLANE_Y, PRESS_REST_BOTTOM } from '../simu
 import type { MatterSimulation, SimulationFrame, SimulationStats, ToolId } from '../simulation/types';
 import {
   MAX_ACCESSORY_SCALE,
+  MAX_RIGID_WELDS,
   addRigidWeldPart,
   emptyRigidWeldDocument,
   nextRigidWeldId,
@@ -24,6 +30,7 @@ import {
   type AccessoryTransformTool,
   type QuatTuple,
   type RigidWeldDocument,
+  type RigidWeldPart,
   type Vec3Tuple,
 } from '../conversion-editor/RigidWeldDocument';
 import {
@@ -90,8 +97,11 @@ export class ConversionWorkspace implements InteractionTarget {
   private activeTool: ToolId | null = null;
   private sectionDragging = false;
   private rigidWeldDocument: RigidWeldDocument = emptyRigidWeldDocument();
+  private deletedAccessory: RigidWeldPart | null = null;
+  private placementPreview: RigidWeldPart | null = null;
+  private accessorySurfaceDragging = false;
   private accessoryDragging = false;
-  private accessoryEditMode = true;
+  private accessoryEditMode = false;
   private readonly controls: ConversionControls;
   private readonly gizmos: AssemblyGizmos;
   /** The viewport sits above the shared canvas, so it routes its own tool input. */
@@ -99,13 +109,22 @@ export class ConversionWorkspace implements InteractionTarget {
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
-    _isActive: () => boolean,
+    private readonly isActive: () => boolean,
   ) {
     this.source = buildSourceMesh(this.sourceId);
     this.thickness = this.source.defaultThickness;
     this.view = new ConversionVisual(this.source, ACCENT);
     this.controls = new ConversionControls({
-      onSource: (id) => this.setSource(id),
+      onSource: (id) => {
+        if (
+          this.rigidWeldDocument.parts.length > 0 &&
+          !window.confirm('Changing the source will remove all rigid accessories. Continue?')
+        ) {
+          this.refresh();
+          return;
+        }
+        this.setSource(id);
+      },
       onView: (view) => {
         this.state.view = view;
         this.view.setView(view);
@@ -130,7 +149,7 @@ export class ConversionWorkspace implements InteractionTarget {
           return;
         }
         this.simulationPaused = paused;
-        this.accessoryEditMode = false;
+        if (!paused) this.setAccessoryEditing(false, false);
         this.view.syncRigidWelds(
           this.rigidWeldDocument.parts,
           this.source,
@@ -147,14 +166,20 @@ export class ConversionWorkspace implements InteractionTarget {
       },
       onAccessoryPreset: (id) => {
         this.state.accessoryPresetId = id;
-        this.setAccessoryTool('place');
+        this.refresh();
       },
+      onAccessoryEdit: (editing) => this.setAccessoryEditing(editing),
+      onAccessoryAdd: () => this.beginAccessoryPlacement(),
+      onAccessoryCancel: () => this.cancelAccessoryPlacement(),
       onAccessoryTool: (tool) => this.setAccessoryTool(tool),
       onAccessorySelect: (id) => {
         this.rigidWeldDocument = { ...this.rigidWeldDocument, selectedId: id };
+        if (id) this.state.accessoryTool = 'move';
         this.refresh();
       },
+      onAccessoryDuplicate: () => this.duplicateSelectedAccessory(),
       onAccessoryDelete: () => this.deleteSelectedAccessory(),
+      onAccessoryUndoDelete: () => this.undoAccessoryDelete(),
     });
 
     this.element = document.createElement('section');
@@ -181,9 +206,11 @@ export class ConversionWorkspace implements InteractionTarget {
       pointerUp: () => this.pointerUp(),
     };
     this.router = new InteractionRouter(this.viewport, [localTarget]);
-    this.viewport.addEventListener('pointermove', this.updateCursor);
+    this.viewport.addEventListener('pointermove', this.onViewportPointerMove);
     this.viewport.addEventListener('pointerdown', this.updateCursor);
     this.viewport.addEventListener('pointerup', this.updateCursor);
+    this.viewport.addEventListener('pointerleave', this.clearPlacementPreview);
+    window.addEventListener('keydown', this.onKeyDown);
     this.frameSource();
     this.scheduleGenerate();
   }
@@ -238,6 +265,14 @@ export class ConversionWorkspace implements InteractionTarget {
     return this.rigidWeldDocument.parts.length;
   }
 
+  get accessoryEditing(): boolean {
+    return this.accessoryEditMode;
+  }
+
+  get selectedAccessoryPosition(): number[] | null {
+    return selectedRigidWeld(this.rigidWeldDocument)?.position ?? null;
+  }
+
   get maxRigidWeldSeparation(): number {
     return this.shell?.maxWeldSeparation() ?? 0;
   }
@@ -262,9 +297,46 @@ export class ConversionWorkspace implements InteractionTarget {
   }
 
   private updateCursor = (event: PointerEvent): void => {
+    if (this.accessoryEditMode) {
+      this.viewport.style.cursor =
+        this.state.accessoryTool === 'place' ? 'copy' : this.state.accessoryTool === 'move' ? 'grab' : 'default';
+      return;
+    }
     const tool = this.state.tool;
-    const cursor = tool === 'grab' ? (event.buttons & 1 ? 'grabbing' : 'grab') : tool === 'drop' ? 'crosshair' : 'ns-resize';
-    this.viewport.style.cursor = this.state.accessoryTool === 'place' ? 'copy' : cursor;
+    this.viewport.style.cursor =
+      tool === 'grab' ? (event.buttons & 1 ? 'grabbing' : 'grab') : tool === 'drop' ? 'crosshair' : 'ns-resize';
+  };
+
+  private onViewportPointerMove = (event: PointerEvent): void => {
+    this.updateCursor(event);
+    if (!this.accessoryEditMode || this.state.accessoryTool !== 'place' || event.buttons !== 0) return;
+    const bounds = this.viewport.getBoundingClientRect();
+    const ray = rayFromViewport(
+      this.view.camera,
+      { left: 0, top: 0, width: bounds.width, height: bounds.height },
+      event.clientX - bounds.left,
+      event.clientY - bounds.top,
+    );
+    this.placementPreview = placeRigidAccessory(
+      ray,
+      this.source,
+      this.state.accessoryPresetId,
+      'rigid-weld-preview',
+    );
+    this.view.syncPlacementPreview(this.placementPreview);
+  };
+
+  private clearPlacementPreview = (): void => {
+    this.placementPreview = null;
+    this.view.syncPlacementPreview(null);
+  };
+
+  private onKeyDown = (event: KeyboardEvent): void => {
+    if (!this.isActive() || !this.accessoryEditMode) return;
+    if (event.key === 'Escape' && this.state.accessoryTool === 'place') {
+      event.preventDefault();
+      this.cancelAccessoryPlacement();
+    }
   };
 
   step(dt: number): void {
@@ -279,7 +351,7 @@ export class ConversionWorkspace implements InteractionTarget {
 
   pointerDown(ray: THREE.Ray): boolean {
     if (this.gizmoBusy()) return false;
-    if (this.state.accessoryTool === 'place') {
+    if (this.accessoryEditMode && this.state.accessoryTool === 'place') {
       const part = placeRigidAccessory(
         ray,
         this.source,
@@ -292,6 +364,8 @@ export class ConversionWorkspace implements InteractionTarget {
         return false;
       }
       this.rigidWeldDocument = addRigidWeldPart(this.rigidWeldDocument, part);
+      this.deletedAccessory = null;
+      this.clearPlacementPreview();
       this.simulationPaused = true;
       this.state.view = 'source';
       this.state.accessoryTool = 'move';
@@ -302,14 +376,21 @@ export class ConversionWorkspace implements InteractionTarget {
       this.refresh();
       return false;
     }
-    if (this.state.accessoryTool !== 'select') {
+    if (this.accessoryEditMode) {
       const id = this.view.rigidWeldAt(ray);
       if (id) {
         this.rigidWeldDocument = { ...this.rigidWeldDocument, selectedId: id };
         this.simulationPaused = true;
+        if (this.state.accessoryTool === 'move') {
+          this.accessorySurfaceDragging = true;
+          this.viewport.classList.add('is-interacting');
+          this.refresh();
+          return true;
+        }
         this.refresh();
         return false;
       }
+      return false;
     }
     if (this.state.sectionVisible && this.view.beginSectionDrag(ray)) {
       this.sectionDragging = true;
@@ -332,6 +413,28 @@ export class ConversionWorkspace implements InteractionTarget {
   }
 
   pointerMove(ray: THREE.Ray): void {
+    if (this.accessorySurfaceDragging) {
+      const selected = selectedRigidWeld(this.rigidWeldDocument);
+      if (!selected) return;
+      const placed = placeRigidAccessory(ray, this.source, selected.presetId as RigidAccessoryId, selected.id);
+      if (!placed) return;
+      const moved = recomputeRigidWelds(
+        {
+          ...placed,
+          label: selected.label,
+          uniformScale: selected.uniformScale,
+        },
+        this.source,
+      );
+      this.rigidWeldDocument = updateRigidWeldPart(this.rigidWeldDocument, selected.id, () => moved);
+      this.view.syncRigidWelds(
+        this.rigidWeldDocument.parts,
+        this.source,
+        this.rigidWeldDocument.selectedId,
+        true,
+      );
+      return;
+    }
     if (this.sectionDragging) {
       this.view.updateSectionDrag(ray);
       return;
@@ -340,6 +443,17 @@ export class ConversionWorkspace implements InteractionTarget {
   }
 
   pointerUp(): void {
+    if (this.accessorySurfaceDragging) {
+      this.accessorySurfaceDragging = false;
+      this.viewport.classList.remove('is-interacting');
+      this.rebuildAfterAccessoryEdit();
+      const selected = selectedRigidWeld(this.rigidWeldDocument);
+      this.status = selected?.valid
+        ? `${selected.label} attached at ${selected.welds.length} weld point${selected.welds.length === 1 ? '' : 's'}.`
+        : 'Detached: slide the accessory back onto the source.';
+      this.refresh();
+      return;
+    }
     this.sectionDragging = false;
     if (this.activeTool === 'grab') this.shell?.endGrab();
     if (this.activeTool === 'press') this.shell?.setPressActive(false);
@@ -351,9 +465,11 @@ export class ConversionWorkspace implements InteractionTarget {
     if (this.generateTimer !== null) clearTimeout(this.generateTimer);
     this.pointerUp();
     this.router.dispose();
-    this.viewport.removeEventListener('pointermove', this.updateCursor);
+    this.viewport.removeEventListener('pointermove', this.onViewportPointerMove);
     this.viewport.removeEventListener('pointerdown', this.updateCursor);
     this.viewport.removeEventListener('pointerup', this.updateCursor);
+    this.viewport.removeEventListener('pointerleave', this.clearPlacementPreview);
+    window.removeEventListener('keydown', this.onKeyDown);
     this.shell?.dispose();
     this.gizmos.dispose();
     this.view.dispose();
@@ -366,7 +482,9 @@ export class ConversionWorkspace implements InteractionTarget {
     this.converted = null;
     this.sourceId = id;
     this.source = buildSourceMesh(id);
-    this.accessoryEditMode = true;
+    this.accessoryEditMode = false;
+    this.deletedAccessory = null;
+    this.clearPlacementPreview();
     if (this.rigidWeldDocument.parts.length > 0) {
       this.rigidWeldDocument = emptyRigidWeldDocument();
       this.status = 'Changed source and cleared rigid welds because their surface anchors no longer apply.';
@@ -527,13 +645,16 @@ export class ConversionWorkspace implements InteractionTarget {
       tool: this.state.tool,
       accessoryPresetId: this.state.accessoryPresetId,
       accessoryTool: this.state.accessoryTool,
-      accessoryParts: this.rigidWeldDocument.parts.map((part) => ({
+      accessoryParts: this.rigidWeldDocument.parts.map((part, index) => ({
         id: part.id,
-        label: part.label,
+        label: `${part.label} ${index + 1}`,
         valid: part.valid,
         weldCount: part.welds.length,
       })),
       selectedAccessoryId: this.rigidWeldDocument.selectedId,
+      accessoryEditing: this.accessoryEditMode,
+      accessoryCapacity: { used: this.rigidWeldDocument.parts.length, max: MAX_RIGID_WELDS },
+      canUndoAccessoryDelete: this.deletedAccessory !== null,
       accessoriesValid: this.rigidWeldDocument.parts.every((part) => part.valid),
       legend: [...materialLegend, ...structureLegend],
     };
@@ -546,10 +667,7 @@ export class ConversionWorkspace implements InteractionTarget {
         this.accessoryEditMode,
       );
     }
-    const transformTool =
-      this.state.accessoryTool === 'move' ||
-      this.state.accessoryTool === 'rotate' ||
-      this.state.accessoryTool === 'scale';
+    const transformTool = this.state.accessoryTool === 'rotate' || this.state.accessoryTool === 'scale';
     const selected = selectedRigidWeld(this.rigidWeldDocument);
     const proxy = selected ? this.view.rigidWeldProxy(selected.id) : undefined;
     if (transformTool && proxy && this.accessoryEditMode) {
@@ -566,10 +684,55 @@ export class ConversionWorkspace implements InteractionTarget {
     }
   }
 
+  private setAccessoryEditing(editing: boolean, refresh = true): void {
+    this.pointerUp();
+    const entering = editing && !this.accessoryEditMode;
+    this.accessoryEditMode = editing;
+    if (editing) {
+      this.simulationPaused = true;
+      if (entering && this.converted) this.createSimulation();
+      this.state.view = 'source';
+      this.view.setView('source');
+      this.state.accessoryTool = this.rigidWeldDocument.selectedId ? 'move' : 'select';
+      this.status = 'Accessory editing is active. Simulation tools are paused.';
+    } else {
+      this.cancelAccessoryPlacement(false);
+      this.state.accessoryTool = 'select';
+      this.status = this.rigidWeldDocument.parts.length
+        ? 'Accessory edits applied. Press Play to simulate the welded assembly.'
+        : 'Accessory editing finished.';
+    }
+    if (refresh) this.refresh();
+  }
+
+  private beginAccessoryPlacement(): void {
+    if (this.rigidWeldDocument.parts.length >= MAX_RIGID_WELDS) {
+      this.status = `Accessory limit reached (${MAX_RIGID_WELDS}).`;
+      this.refresh();
+      return;
+    }
+    if (!this.accessoryEditMode) this.setAccessoryEditing(true, false);
+    this.state.accessoryTool = 'place';
+    this.state.view = 'source';
+    this.view.setView('source');
+    this.status = 'Move over the source to preview attachment, then click to place. Press Escape to cancel.';
+    this.refresh();
+  }
+
+  private cancelAccessoryPlacement(refresh = true): void {
+    this.clearPlacementPreview();
+    if (this.state.accessoryTool === 'place') {
+      this.state.accessoryTool = this.rigidWeldDocument.selectedId ? 'move' : 'select';
+      this.status = 'Placement cancelled.';
+    }
+    if (refresh) this.refresh();
+  }
+
   private setAccessoryTool(tool: AccessoryTransformTool): void {
     this.pointerUp();
     this.simulationPaused = true;
     this.accessoryEditMode = true;
+    this.clearPlacementPreview();
     this.state.accessoryTool = tool;
     this.state.view = 'source';
     this.view.setView('source');
@@ -585,9 +748,43 @@ export class ConversionWorkspace implements InteractionTarget {
   private deleteSelectedAccessory(): void {
     const selected = selectedRigidWeld(this.rigidWeldDocument);
     if (!selected) return;
+    this.deletedAccessory = selected;
     this.rigidWeldDocument = removeRigidWeldPart(this.rigidWeldDocument, selected.id);
     this.rebuildAfterAccessoryEdit();
     this.status = `Deleted ${selected.label} and its welds.`;
+    this.refresh();
+  }
+
+  private undoAccessoryDelete(): void {
+    if (!this.deletedAccessory || this.rigidWeldDocument.parts.length >= MAX_RIGID_WELDS) return;
+    const restored = this.deletedAccessory;
+    this.deletedAccessory = null;
+    this.rigidWeldDocument = addRigidWeldPart(this.rigidWeldDocument, restored);
+    this.rebuildAfterAccessoryEdit();
+    this.status = `Restored ${restored.label}.`;
+    this.refresh();
+  }
+
+  private duplicateSelectedAccessory(): void {
+    const selected = selectedRigidWeld(this.rigidWeldDocument);
+    if (!selected || this.rigidWeldDocument.parts.length >= MAX_RIGID_WELDS) return;
+    const id = nextRigidWeldId(this.rigidWeldDocument.parts);
+    const duplicate = recomputeRigidWelds(
+      {
+        ...selected,
+        id,
+        position: [selected.position[0] + 0.035, selected.position[1], selected.position[2]],
+        welds: [],
+      },
+      this.source,
+    );
+    this.rigidWeldDocument = addRigidWeldPart(this.rigidWeldDocument, duplicate);
+    this.deletedAccessory = null;
+    this.state.accessoryTool = 'move';
+    this.rebuildAfterAccessoryEdit();
+    this.status = duplicate.valid
+      ? `Duplicated ${duplicate.label}; slide it to a new location.`
+      : `Duplicated ${duplicate.label}, but it needs to be slid back onto the source.`;
     this.refresh();
   }
 

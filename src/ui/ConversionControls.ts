@@ -63,6 +63,9 @@ export interface ConversionControlModel {
   accessoryTool: AccessoryTransformTool;
   accessoryParts: readonly { id: string; label: string; valid: boolean; weldCount: number }[];
   selectedAccessoryId: string | null;
+  accessoryEditing: boolean;
+  accessoryCapacity: { used: number; max: number };
+  canUndoAccessoryDelete: boolean;
   accessoriesValid: boolean;
   legend: ConversionLegendEntry[];
 }
@@ -78,9 +81,14 @@ export interface ConversionControlHandlers {
   onReset(): void;
   onTool(tool: ToolId): void;
   onAccessoryPreset(id: RigidAccessoryId): void;
+  onAccessoryEdit(editing: boolean): void;
+  onAccessoryAdd(): void;
+  onAccessoryCancel(): void;
   onAccessoryTool(tool: AccessoryTransformTool): void;
   onAccessorySelect(id: string | null): void;
+  onAccessoryDuplicate(): void;
   onAccessoryDelete(): void;
+  onAccessoryUndoDelete(): void;
 }
 
 const VIEWS: { id: ConversionView; label: string; hint: string }[] = [
@@ -102,8 +110,7 @@ const SECTION_HINT = {
 } satisfies Record<ConversionView, string>;
 const CAMERA_HINT = 'Two-finger scroll or middle-drag orbit · Right-drag pan · Pinch or wheel zoom';
 const ACCESSORY_TOOLS: { id: AccessoryTransformTool; label: string }[] = [
-  { id: 'place', label: 'Place' },
-  { id: 'move', label: 'Move' },
+  { id: 'move', label: 'Slide' },
   { id: 'rotate', label: 'Rotate' },
   { id: 'scale', label: 'Scale' },
 ];
@@ -141,8 +148,14 @@ export class ConversionControls {
   private readonly accessoryPreset: HTMLSelectElement;
   private readonly accessoryPart: HTMLSelectElement;
   private readonly accessoryStatus = element('p', 'context-description');
+  private readonly accessoryBody = element('div', 'rigid-weld-editor');
+  private readonly accessoryEdit: HTMLButtonElement;
+  private readonly accessoryAdd: HTMLButtonElement;
+  private readonly accessoryCancel: HTMLButtonElement;
   private readonly accessoryButtons = new Map<AccessoryTransformTool, HTMLButtonElement>();
+  private readonly accessoryDuplicate: HTMLButtonElement;
   private readonly accessoryDelete: HTMLButtonElement;
+  private readonly accessoryUndoDelete: HTMLButtonElement;
   private readonly stats = element('p', 'context-description', 'Generating shell…');
   private readonly play: HTMLButtonElement;
   private readonly resetButton: HTMLButtonElement;
@@ -194,6 +207,11 @@ export class ConversionControls {
     source.append(this.field('Source', this.sourceSelect), this.sourceDescription, this.structure.parentElement!);
 
     const rigidWelds = this.section('Rigid welds');
+    this.accessoryEdit = this.button('Edit accessories', 'rigid-weld-edit', () => {
+      handlers.onAccessoryEdit(this.accessoryEdit.dataset.editing !== 'true');
+    });
+    const editActions = element('div', 'action-row');
+    editActions.append(this.accessoryEdit);
     const accessoryDefinitions = listRigidAccessories();
     this.accessoryPreset = this.select(
       accessoryDefinitions.map((item) => [item.id, item.label]),
@@ -201,25 +219,36 @@ export class ConversionControls {
       'Rigid accessory',
     );
     this.accessoryPreset.dataset.testid = 'rigid-weld-preset';
+    this.accessoryAdd = this.button('Add accessory', 'rigid-weld-add', handlers.onAccessoryAdd);
+    this.accessoryCancel = this.button('Cancel placement', 'rigid-weld-cancel', handlers.onAccessoryCancel);
+    const addActions = element('div', 'action-row');
+    addActions.append(this.accessoryAdd, this.accessoryCancel);
     const accessoryTools = this.radioGroup('Rigid weld tool');
     for (const tool of ACCESSORY_TOOLS) {
-      const button = this.radio(tool.label, () => handlers.onAccessoryTool(tool.id), `${tool.label} a rigid welded mesh`);
+      const button = this.radio(
+        tool.label,
+        () => handlers.onAccessoryTool(tool.id),
+        tool.id === 'move' ? 'Drag the selected accessory along the source surface' : `${tool.label} the selected accessory`,
+      );
       button.dataset.accessoryTool = tool.id;
       accessoryTools.append(button);
       this.accessoryButtons.set(tool.id, button);
     }
     this.accessoryPart = this.select([], (value) => handlers.onAccessorySelect(value || null), 'Placed rigid mesh');
     this.accessoryPart.dataset.testid = 'rigid-weld-list';
+    this.accessoryDuplicate = this.button('Duplicate', 'rigid-weld-duplicate', handlers.onAccessoryDuplicate);
     this.accessoryDelete = this.button('Delete', 'rigid-weld-delete', handlers.onAccessoryDelete);
+    this.accessoryUndoDelete = this.button('Undo delete', 'rigid-weld-undo-delete', handlers.onAccessoryUndoDelete);
     const accessoryActions = element('div', 'action-row');
-    accessoryActions.append(this.accessoryDelete);
-    rigidWelds.append(
+    accessoryActions.append(this.accessoryDuplicate, this.accessoryDelete, this.accessoryUndoDelete);
+    this.accessoryBody.append(
       this.field('Mesh', this.accessoryPreset),
-      accessoryTools,
+      addActions,
       this.field('Placed', this.accessoryPart),
+      accessoryTools,
       accessoryActions,
-      this.accessoryStatus,
     );
+    rigidWelds.append(editActions, this.accessoryBody, this.accessoryStatus);
 
     const shell = this.section('Thin shell');
     this.thickness = element('input', 'brush-range');
@@ -292,8 +321,24 @@ export class ConversionControls {
     materialButton.title = model.materialMapped
       ? 'Color the source mesh by its material map'
       : 'This source uses one material';
-    for (const button of this.toolButtons.values()) button.disabled = !ready;
+    for (const button of this.toolButtons.values()) {
+      button.disabled = !ready || model.accessoryEditing;
+      if (model.accessoryEditing) {
+        button.classList.remove('is-selected');
+        button.setAttribute('aria-checked', 'false');
+      }
+    }
+    this.accessoryEdit.dataset.editing = String(model.accessoryEditing);
+    this.accessoryEdit.textContent = model.accessoryEditing ? 'Done editing' : 'Edit accessories';
+    this.accessoryEdit.classList.toggle('is-selected', model.accessoryEditing);
+    this.accessoryBody.hidden = !model.accessoryEditing;
     this.accessoryPreset.value = model.accessoryPresetId;
+    const atCapacity = model.accessoryCapacity.used >= model.accessoryCapacity.max;
+    this.accessoryAdd.disabled = atCapacity || model.accessoryTool === 'place';
+    this.accessoryAdd.textContent = atCapacity
+      ? `Accessory limit reached (${model.accessoryCapacity.max})`
+      : `Add ${listRigidAccessories().find((item) => item.id === model.accessoryPresetId)?.label ?? 'accessory'}`;
+    this.accessoryCancel.hidden = model.accessoryTool !== 'place';
     this.accessoryPart.replaceChildren();
     const none = document.createElement('option');
     none.value = '';
@@ -307,18 +352,30 @@ export class ConversionControls {
     }
     this.accessoryPart.value = model.selectedAccessoryId ?? '';
     const selectedAccessory = model.accessoryParts.find((part) => part.id === model.selectedAccessoryId);
+    this.accessoryDuplicate.disabled = !selectedAccessory || atCapacity;
     this.accessoryDelete.disabled = !selectedAccessory;
-    for (const [tool, button] of this.accessoryButtons) {
-      button.disabled = tool !== 'place' && !selectedAccessory;
+    this.accessoryUndoDelete.disabled = !model.canUndoAccessoryDelete || atCapacity;
+    for (const button of this.accessoryButtons.values()) {
+      button.disabled = !selectedAccessory || model.accessoryTool === 'place';
     }
     this.accessoryStatus.textContent =
-      model.accessoryParts.length === 0
-        ? 'Choose a mesh, click Place, then click the source. Contact points weld automatically.'
+      !model.accessoryEditing
+        ? model.accessoryParts.length === 0
+          ? 'No rigid accessories. Enter edit mode to add one.'
+          : `${model.accessoryParts.length}/${model.accessoryCapacity.max} accessories · ${
+              model.accessoryParts.every((part) => part.valid) ? 'all attached' : 'detached accessory needs attention'
+            }.`
+        : model.accessoryTool === 'place'
+          ? 'Move over the source to preview attachment, then click to place. Press Escape to cancel.'
+          : model.accessoryParts.length === 0
+            ? 'Choose a mesh and click Add.'
         : selectedAccessory
           ? selectedAccessory.valid
-            ? `${selectedAccessory.weldCount} automatic weld point${selectedAccessory.weldCount === 1 ? '' : 's'}.`
-            : 'Detached: move it back into contact before simulating.'
-          : `${model.accessoryParts.length} rigid mesh${model.accessoryParts.length === 1 ? '' : 'es'} placed.`;
+            ? `${selectedAccessory.label} is attached at ${selectedAccessory.weldCount} weld point${
+                selectedAccessory.weldCount === 1 ? '' : 's'
+              }. Slide it on the surface or use Rotate and Scale.`
+            : `${selectedAccessory.label} is detached. Slide it onto the source before simulating.`
+          : `${model.accessoryParts.length}/${model.accessoryCapacity.max} accessories · select one in the viewport or list.`;
 
     const centimeters = thicknessToCentimeters(model.thickness);
     if (document.activeElement !== this.thickness) this.thickness.value = centimeters.toFixed(1);
@@ -345,7 +402,19 @@ export class ConversionControls {
     }
     this.legend.hidden = model.legend.length === 0;
 
-    const hint = model.sectionVisible ? SECTION_HINT[model.view] : (SIM_TOOLS.find((tool) => tool.id === model.tool)?.hint ?? '');
+    const hint = model.accessoryEditing
+      ? model.accessoryTool === 'place'
+        ? 'Green preview = attached · click to place · Escape cancels'
+        : selectedAccessory
+          ? selectedAccessory.valid
+            ? `${selectedAccessory.label}: ${selectedAccessory.weldCount} weld point${
+                selectedAccessory.weldCount === 1 ? '' : 's'
+              } · drag to slide`
+            : `${selectedAccessory.label}: detached · drag it onto the source`
+          : 'Select an accessory or add a new one'
+      : model.sectionVisible
+        ? SECTION_HINT[model.view]
+        : (SIM_TOOLS.find((tool) => tool.id === model.tool)?.hint ?? '');
     this.hint.textContent = `${hint} · ${CAMERA_HINT}`;
   }
 

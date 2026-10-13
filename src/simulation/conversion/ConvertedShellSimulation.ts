@@ -1,5 +1,8 @@
 import { DEFAULT_PRESET_IDS, SHELL_PRESETS, type PlasticSettings, type ShellPreset } from '../../materials/presets';
 import { applyDistancePlasticity, DistanceConstraints, solveDistances } from '../xpbd/constraints';
+import { applyAerodynamics, CALM, type WindSettings } from '../xpbd/aerodynamics';
+import { solveCapsuleCollisions, startInsideMasks, type CapsuleCollider } from '../xpbd/capsuleColliders';
+import { DihedralConstraints, solveDihedrals } from '../xpbd/dihedralBending';
 import { SpatialHash } from '../xpbd/SpatialHash';
 import { XpbdSimulation } from '../xpbd/XpbdSimulation';
 import { ShapeMatchingConstraint } from '../xpbd/shapeMatching';
@@ -15,6 +18,8 @@ import type { SourceMesh } from './sourceMeshes';
 
 const REFERENCE_THICKNESS = 0.03;
 const MIN_THICKNESS = 0.002;
+const COLLIDER_MARGIN = 0.012;
+const WIND_INTERVAL = 3;
 
 export interface SimulatableSurface {
   positions: Float32Array;
@@ -47,6 +52,23 @@ export interface ConvertedShellSimulationOptions {
     source: SourceMesh;
     parts: readonly RigidWeldPart[];
   };
+  /** A material outside the shared preset list; `presetId` is ignored when set. */
+  preset?: ShellPreset;
+  /**
+   * `dihedral` bends by the angle across each interior edge (compliance per radian);
+   * `distance` links the wing tips across each edge.
+   */
+  bending?: 'distance' | 'dihedral';
+  /** Uses the preset's bend compliance as-is instead of scaling it with thickness cubed. */
+  fixedBending?: boolean;
+  /** Lower bound for the self-contact distance, e.g. a rendered thickness. */
+  minContactDistance?: number;
+  pickRadius?: number;
+  grabRadius?: number;
+  /** Static bodies the shell drapes over. */
+  colliders?: readonly CapsuleCollider[];
+  /** Runs self-collision every N substeps; cloth moves millimetres per substep, so 2-3 is enough. */
+  selfCollisionInterval?: number;
 }
 
 export interface RegionCompliance {
@@ -77,6 +99,15 @@ export class ConvertedShellSimulation extends XpbdSimulation<ShellPreset> {
   private readonly bendPlastic: Uint8Array | null = null;
   private readonly rigidGroups: ShapeMatchingConstraint[] = [];
   private readonly welds: WeldConstraints;
+  private readonly dihedrals: DihedralConstraints | null;
+  private readonly fixedBending: boolean;
+  private readonly minContactDistance: number;
+  private readonly colliders: readonly CapsuleCollider[];
+  private readonly colliderExempt: Uint8Array[];
+  private readonly shellTriangles: Uint32Array;
+  private wind: WindSettings = CALM;
+  private readonly selfCollisionInterval: number;
+  private substep = 0;
   readonly shellParticleCount: number;
 
   constructor(options: ConvertedShellSimulationOptions) {
@@ -84,8 +115,8 @@ export class ConvertedShellSimulation extends XpbdSimulation<ShellPreset> {
     const thickness = Math.max(MIN_THICKNESS, options.thickness);
     const compiled = compileRigidWelds(mesh, options.rigidWelds);
     super({
-      presets: SHELL_PRESETS,
-      presetId: options.presetId ?? DEFAULT_PRESET_IDS.shell,
+      presets: options.preset ? [options.preset] : SHELL_PRESETS,
+      presetId: options.preset?.id ?? options.presetId ?? DEFAULT_PRESET_IDS.shell,
       restPositions: compiled.positions,
       totalMass: (options.totalMass ?? 0.5) + compiled.totalMass,
       topology: {
@@ -98,12 +129,19 @@ export class ConvertedShellSimulation extends XpbdSimulation<ShellPreset> {
       surfaceTriangles: compiled.triangles,
       particleRadius: Math.max(0.008, thickness * 0.5),
       pressFloor: thickness,
-      pickRadius: 0.16,
-      grabRadius: 0.28,
+      pickRadius: options.pickRadius ?? 0.16,
+      grabRadius: options.grabRadius ?? 0.28,
       startJitter: 0.001,
     });
     this.stretch = new DistanceConstraints(mesh.stretchPairs, mesh.positions);
     this.bend = new DistanceConstraints(mesh.bendPairs, mesh.positions);
+    this.dihedrals = options.bending === 'dihedral' ? new DihedralConstraints(mesh.triangles, mesh.positions) : null;
+    this.fixedBending = options.fixedBending ?? false;
+    this.minContactDistance = options.minContactDistance ?? 0;
+    this.colliders = options.colliders ?? [];
+    this.colliderExempt = startInsideMasks(this.restPositions, this.colliders, COLLIDER_MARGIN);
+    this.shellTriangles = mesh.triangles;
+    this.selfCollisionInterval = Math.max(1, Math.round(options.selfCollisionInterval ?? 1));
     this.shellParticleCount = mesh.positions.length / 3;
     const shellMass = options.totalMass ?? 0.5;
     this.invMass.fill(this.shellParticleCount / shellMass, 0, this.shellParticleCount);
@@ -152,8 +190,9 @@ export class ConvertedShellSimulation extends XpbdSimulation<ShellPreset> {
   /** Changes visual/contact thickness and cubic bending stiffness without resetting deformation. */
   setThickness(thickness: number): void {
     this.thickness = Math.max(MIN_THICKNESS, thickness);
-    this.contactDistance = Math.max(this.thickness, this.meanEdgeLength * 0.45);
-    this.hash = new SpatialHash(this.contactDistance, this.count);
+    this.contactDistance = Math.max(this.thickness, this.meanEdgeLength * 0.45, this.minContactDistance);
+    // Cells twice the query radius make each query touch 8 cells instead of 27.
+    this.hash = new SpatialHash(this.contactDistance * 2, this.count);
     this.setCollisionThickness(Math.max(0.008, this.thickness * 0.5), this.thickness);
     this.ignored.clear();
     for (let i = 0; i < this.stretch.count; i++) {
@@ -161,6 +200,17 @@ export class ConvertedShellSimulation extends XpbdSimulation<ShellPreset> {
     }
     this.ignoreRestContacts(this.restPositions);
     this.applyRegionBending();
+  }
+
+  /** Wind applied as per-face aerodynamic drag; `CALM` turns it off. */
+  setWind(wind: WindSettings): void {
+    this.wind = wind;
+  }
+
+  /** Wind changes slowly relative to a substep, so it is applied as one impulse every few substeps. */
+  protected applyForces(h: number): void {
+    if (this.substep % WIND_INTERVAL !== 0) return;
+    applyAerodynamics(this.positions, this.velocities, this.invMass, this.shellTriangles, this.wind, this.time, h * WIND_INTERVAL);
   }
 
   /** Bending stiffness still grows with thickness cubed, per material. */
@@ -210,13 +260,11 @@ export class ConvertedShellSimulation extends XpbdSimulation<ShellPreset> {
         this.preset.compressionCompliance,
       );
     }
-    solveDistances(
-      this.positions,
-      this.invMass,
-      this.bend,
-      bendingComplianceForThickness(this.preset.bendCompliance, this.thickness),
-      h,
-    );
+    const bendCompliance = this.fixedBending
+      ? this.preset.bendCompliance
+      : bendingComplianceForThickness(this.preset.bendCompliance, this.thickness);
+    if (this.dihedrals) solveDihedrals(this.positions, this.invMass, this.dihedrals, bendCompliance, h);
+    else solveDistances(this.positions, this.invMass, this.bend, bendCompliance, h);
     for (let iteration = 0; iteration < 10; iteration++) {
       for (const rigid of this.rigidGroups) rigid.solve(this.positions);
       this.welds.solve(this.positions, this.invMass);
@@ -236,6 +284,19 @@ export class ConvertedShellSimulation extends XpbdSimulation<ShellPreset> {
   }
 
   protected solveExtraCollisions(): void {
+    if (this.colliders.length > 0) {
+      solveCapsuleCollisions(
+        this.positions,
+        this.previous,
+        this.invMass,
+        this.colliders,
+        COLLIDER_MARGIN,
+        this.preset.friction,
+        this.colliderExempt,
+      );
+    }
+    this.substep += 1;
+    if (this.substep % this.selfCollisionInterval !== 0) return;
     const { positions, invMass, hash, count, contactDistance } = this;
     hash.create(positions, count);
     const reach2 = contactDistance * contactDistance;
@@ -245,12 +306,12 @@ export class ConvertedShellSimulation extends XpbdSimulation<ShellPreset> {
         const j = hash.queryIds[q];
         if (j <= i) continue;
         const w = invMass[i] + invMass[j];
-        if (w === 0 || this.ignored.has(pairKey(i, j))) continue;
+        if (w === 0) continue;
         const dx = positions[j * 3] - positions[i * 3];
         const dy = positions[j * 3 + 1] - positions[i * 3 + 1];
         const dz = positions[j * 3 + 2] - positions[i * 3 + 2];
         const d2 = dx * dx + dy * dy + dz * dz;
-        if (d2 >= reach2 || d2 < 1e-12) continue;
+        if (d2 >= reach2 || d2 < 1e-12 || this.ignored.has(pairKey(i, j))) continue;
         const d = Math.sqrt(d2);
         const correction = (contactDistance - d) / d / w;
         const ci = correction * invMass[i];

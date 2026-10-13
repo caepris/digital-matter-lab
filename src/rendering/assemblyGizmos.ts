@@ -110,7 +110,7 @@ export function isTrackpadScroll(event: Pick<WheelEvent, 'deltaMode' | 'deltaX' 
 
 const MIN_POLAR = 0.05;
 /** Wheel events closer together than this belong to the same trackpad gesture. */
-const TRACKPAD_GESTURE_GAP_MS = 180;
+export const TRACKPAD_GESTURE_GAP_MS = 180;
 
 /** Rotates the camera around `target`: `left` turns about world up, `up` tilts toward the poles. */
 export function orbitCamera(camera: THREE.Camera, target: THREE.Vector3, left: number, up: number): void {

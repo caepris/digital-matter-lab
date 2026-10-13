@@ -70,7 +70,7 @@ export function convertSurface(input: SurfaceConversionInput): ConvertedSurface 
     stretchPairs: pairs.stretchPairs,
     bendPairs: pairs.bendPairs,
     boundaryPairs: pairs.boundaryPairs,
-    sourceBindings: bindSources(positions, compact.positions, compact.triangles, targetSpacing),
+    sourceBindings: bindSourceVertices(positions, compact.positions, compact.triangles, targetSpacing),
   };
 }
 
@@ -667,7 +667,7 @@ function uniquePairs(pairs: number[]): number[] {
   return sorted;
 }
 
-function bindSources(
+export function bindSourceVertices(
   source: Float32Array,
   positions: Float32Array,
   triangles: Uint32Array,
